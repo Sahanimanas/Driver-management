@@ -28,7 +28,7 @@ export default function Expenses() {
 function Requests() {
   const { can } = useAuth();
   const toast = useToast();
-  const [status, setStatus] = useState('pending_sm,pending_director,approved');
+  const [status, setStatus] = useState('pending_approval,approved');
   const [newOpen, setNewOpen] = useState(false);
   const [acting, setActing] = useState(null);
   const [settling, setSettling] = useState(null);
@@ -41,8 +41,9 @@ function Requests() {
   return (
     <>
       <div className="grid c4" style={{ marginBottom: 16 }}>
-        <Stat tone="amber" label="With Senior Manager" value={inbox.data?.pending_sm ?? '—'} />
-        <Stat tone="accent" label="With Director" value={inbox.data?.pending_director ?? '—'}
+        <Stat tone="amber" label="Awaiting approval" value={inbox.data?.pending_approval ?? '—'}
+          foot="with Admin / Director" />
+        <Stat tone="accent" label="My open requests" value={inbox.data?.my_requests ?? '—'}
           foot={`requests of ${inr0(threshold)} and above`} />
         <Stat tone="warn" label="Open, awaiting supporting" value={inbox.data?.open_settlements ?? '—'} />
         <Stat label="Filtered total" value={data ? inr0(data.totals.amount) : '—'}
@@ -61,9 +62,8 @@ function Requests() {
 
       <div className="toolbar">
         <select value={status} onChange={(e) => setStatus(e.target.value)}>
-          <option value="pending_sm,pending_director,approved">Open requests</option>
-          <option value="pending_sm">With Senior Manager</option>
-          <option value="pending_director">With Director</option>
+          <option value="pending_approval,approved">Open requests</option>
+          <option value="pending_approval">Awaiting approval</option>
           <option value="approved">Approved, awaiting settlement</option>
           <option value="settled">Settled</option>
           <option value="rejected">Rejected</option>
@@ -73,7 +73,7 @@ function Requests() {
         <button onClick={() => api.download(
           `/expenses/export/register?from=${today().slice(0, 4)}-01-01&to=${today()}`,
           'expense-register.xlsx')}>⭳ Register</button>
-        {can('supervisor', 'senior_manager') && (
+        {can('supervisor') && (
           <button className="primary" onClick={() => setNewOpen(true)}>+ Raise request</button>
         )}
       </div>
@@ -121,7 +121,7 @@ function Requests() {
                         : <span className="muted small">none</span>}
                     </td>
                     <td className="right nowrap">
-                      {(x.actions.canApproveSm || x.actions.canApproveDirector) && (
+                      {x.actions.canApprove && (
                         <>
                           <button className="sm good" onClick={() => setActing({ x, decision: 'approve' })}>Approve</button>{' '}
                           <button className="sm danger" onClick={() => setActing({ x, decision: 'reject' })}>Reject</button>
@@ -382,7 +382,7 @@ function PettyCash() {
     <>
       <div className="toolbar">
         <div className="spacer" />
-        {can('accounts') && <button className="primary" onClick={() => setIssueOpen(true)}>+ Issue petty cash</button>}
+        {can('finance') && <button className="primary" onClick={() => setIssueOpen(true)}>+ Issue petty cash</button>}
       </div>
 
       <Card title="Supervisor balances" tight>

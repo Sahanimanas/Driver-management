@@ -19,7 +19,7 @@ export default function Salary() {
 
   const { data, loading, error, reload } = useAsync(() => api.get(`/salary/periods/${period}`), [period]);
   const periods = useAsync(() => api.get('/salary/periods'), []);
-  const manage = can('accounts', 'senior_manager');
+  const manage = can('finance');
 
   async function act(kind, fn, message) {
     setBusy(kind);

@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { api } from './lib/api.js';
-import { useAuth, Loading } from './lib/ui.jsx';
+import { useAuth, useBranding, Loading } from './lib/ui.jsx';
+import { ROLE_LABEL } from './lib/roles.js';
 
 import Login from './pages/Login.jsx';
 import Dashboard from './pages/Dashboard.jsx';
@@ -17,6 +18,8 @@ import Salary from './pages/Salary.jsx';
 import Tally from './pages/Tally.jsx';
 import Messaging from './pages/Messaging.jsx';
 import Users from './pages/Users.jsx';
+import SalaryMaster from './pages/SalaryMaster.jsx';
+import Settings from './pages/Settings.jsx';
 
 const NAV = [
   { group: 'Operations' },
@@ -29,10 +32,13 @@ const NAV = [
   { to: '/advances', label: 'Advances', icon: '₹', badge: 'advances' },
   { to: '/expenses', label: 'Expenses', icon: '🧾', badge: 'expenses' },
   { to: '/salary', label: 'Salary', icon: '📄' },
-  { to: '/tally', label: 'Tally Linkage', icon: '⇄', roles: ['accounts', 'senior_manager', 'director'] },
+  { to: '/salary-master', label: 'Salary Master', icon: '📐' },
+  { to: '/tally', label: 'Tally Linkage', icon: '⇄', roles: ['finance'] },
   { group: 'Communication' },
   { to: '/messaging', label: 'WhatsApp', icon: '💬' },
-  { to: '/users', label: 'Users', icon: '⚙', roles: [] },
+  { group: 'Administration' },
+  { to: '/users', label: 'Users & roles', icon: '👥', roles: [] },
+  { to: '/settings', label: 'Settings', icon: '⚙', roles: [] },
 ];
 
 export default function App() {
@@ -48,10 +54,10 @@ export default function App() {
     ]).then(([adv, exp]) => {
       const forMe = (inbox) => {
         if (!inbox) return 0;
-        if (user.role === 'senior_manager') return inbox.pending_sm;
-        if (user.role === 'director') return inbox.pending_director;
-        if (user.role === 'accounts') return inbox.approved_unpaid ?? inbox.open_settlements ?? 0;
-        if (user.role === 'admin') return inbox.pending_sm + inbox.pending_director;
+        // Admin / Director sees what is waiting on them to approve; Finance
+        // sees what is waiting to be paid; a supervisor sees their own.
+        if (user.role === 'admin') return inbox.pending_approval ?? 0;
+        if (user.role === 'finance') return inbox.approved_unpaid ?? inbox.open_settlements ?? 0;
         return inbox.my_requests ?? 0;
       };
       setBadges({ advances: forMe(adv), expenses: forMe(exp) });
@@ -64,10 +70,7 @@ export default function App() {
   return (
     <div className="app">
       <aside className="sidebar">
-        <div className="brand">
-          <b>Quantum</b>
-          <span>Driver Management</span>
-        </div>
+        <Brand />
         <nav>
           {NAV.map((item, i) => {
             if (item.group) return <div className="group" key={`g${i}`}>{item.group}</div>;
@@ -105,7 +108,9 @@ export default function App() {
           <Route path="/salary" element={<Salary />} />
           <Route path="/tally" element={<Tally />} />
           <Route path="/messaging" element={<Messaging />} />
+          <Route path="/salary-master" element={<SalaryMaster />} />
           <Route path="/users" element={<Users />} />
+          <Route path="/settings" element={<Settings />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </div>
@@ -113,12 +118,21 @@ export default function App() {
   );
 }
 
+/** The client supplies the name and the logo, so both come from the server. */
+function Brand() {
+  const brand = useBranding();
+  return (
+    <div className="brand">
+      {brand.logoUrl && <img className="brand-logo" src={brand.logoUrl} alt="" />}
+      <b>{brand.appName}</b>
+      <span>{brand.tagline}</span>
+    </div>
+  );
+}
+
 function UserBox() {
   const { user, signOut } = useAuth();
-  const label = {
-    admin: 'Administrator', supervisor: 'Supervisor', senior_manager: 'Senior Manager',
-    director: 'Director', accounts: 'Accounts',
-  }[user.role];
+  const label = ROLE_LABEL[user.role] || user.role;
   return (
     <div className="who">
       <b>{user.name}</b>

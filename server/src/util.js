@@ -79,13 +79,28 @@ export function oneOf(value, allowed, label) {
 
 export const digits = (v) => String(v ?? '').replace(/\D/g, '');
 
+/**
+ * Twelve digits, and never starting 0 or 1 — the issuing authority does not
+ * allot those. Twelve of the same digit is a placeholder somebody typed to get
+ * past the form, so it is refused too.
+ *
+ * The registration form applies the same rules as you type; these are the
+ * enforcement, since the form can be bypassed.
+ */
 export function validAadhar(v) {
-  return digits(v).length === 12;
+  const d = digits(v);
+  if (d.length !== 12) return false;
+  if (/^[01]/.test(d)) return false;
+  if (/^(\d)\1{11}$/.test(d)) return false;
+  return true;
 }
 
+/** An Indian mobile number: ten digits starting 6-9, with or without 91. */
 export function validPhone(v) {
-  const d = digits(v);
-  return d.length === 10 || (d.length === 12 && d.startsWith('91'));
+  let d = digits(v);
+  if (d.length === 12 && d.startsWith('91')) d = d.slice(2);
+  if (d.length === 11 && d.startsWith('0')) d = d.slice(1);
+  return d.length === 10 && /^[6-9]/.test(d);
 }
 
 /** Normalise an Indian mobile number to E.164 for WhatsApp. */

@@ -10,17 +10,19 @@ export default function StatusChip({ value, label }) {
   );
 }
 
-/** Approval pipeline: raised → SM → Director → paid/settled. */
-export function ApprovalSteps({ status, finalLabel = 'Paid', skipDirector }) {
-  const order = ['raised', 'pending_sm', 'pending_director', 'approved', 'final'];
+/**
+ * The approval pipeline: raised → Admin / Director → approved → paid or
+ * settled. One approval stage, matching the three-role model.
+ */
+export function ApprovalSteps({ status, finalLabel = 'Paid' }) {
+  const order = ['raised', 'pending_approval', 'approved', 'final'];
   const at = {
-    pending_sm: 1, pending_director: 2, approved: 3, paid: 4, settled: 4, rejected: -1,
+    pending_approval: 1, approved: 2, paid: 3, settled: 3, rejected: -1,
   }[status] ?? 0;
 
   const steps = [
     { key: 'raised', label: 'Raised' },
-    { key: 'pending_sm', label: 'Senior Manager' },
-    ...(skipDirector ? [] : [{ key: 'pending_director', label: 'Director' }]),
+    { key: 'pending_approval', label: 'Admin / Director' },
     { key: 'approved', label: 'Approved' },
     { key: 'final', label: finalLabel },
   ];

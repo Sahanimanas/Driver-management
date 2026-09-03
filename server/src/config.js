@@ -37,11 +37,29 @@ export const config = {
     },
   },
 
-  // Optional OCR endpoint used by "scan the registration page to populate the
-  // fields". When unset the server falls back to the built-in text parser.
+  // "Scan the registration page to populate the fields." A remote OCR service
+  // is used when OCR_API_URL is set; otherwise the bundled local engine reads
+  // the page in-process. Either way a PDF that already has a text layer is
+  // read directly and never goes near OCR.
   ocr: {
     url: process.env.OCR_API_URL || '',
     key: process.env.OCR_API_KEY || '',
+    timeoutMs: Number(process.env.OCR_TIMEOUT_MS || 60000),
+    // Starting the local engine downloads its language pack on first use.
+    startupTimeoutMs: Number(process.env.OCR_STARTUP_TIMEOUT_MS || 120000),
+    // tesseract.js language packs, '+'-joined. 'eng' covers the client pages,
+    // Aadhaar and licences; add 'hin' for Devanagari on Aadhaar cards.
+    languages: process.env.OCR_LANGUAGES || 'eng',
+    // Where the local engine keeps its downloaded language packs.
+    cacheDir: process.env.OCR_CACHE_DIR
+      || path.join(process.env.DATA_DIR || path.join(ROOT, 'data'), 'ocr'),
+  },
+
+  // Branding. The client is supplying the trading name and the logo; both are
+  // editable at runtime from Settings, and these are only the fallbacks.
+  branding: {
+    appName: process.env.APP_NAME || 'Quantum',
+    tagline: process.env.APP_TAGLINE || 'Driver Attendance & Management',
   },
 };
 
@@ -49,3 +67,5 @@ export const db_file = path.join(config.dataDir, 'quantum.db');
 
 fs.mkdirSync(config.dataDir, { recursive: true });
 fs.mkdirSync(config.uploadDir, { recursive: true });
+// The local OCR engine caches its language packs here.
+fs.mkdirSync(config.ocr.cacheDir, { recursive: true });

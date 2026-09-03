@@ -15,7 +15,16 @@ const ALLOWED = new Set([
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   'application/vnd.ms-excel',
   'text/csv',
+  'text/plain',
 ]);
+
+/**
+ * Some browsers -- and most command line clients -- send a spreadsheet as
+ * `application/octet-stream` rather than its real type, so the extension is
+ * accepted as a second opinion when the declared type is a generic one.
+ */
+const ALLOWED_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp', '.heic', '.pdf', '.xlsx', '.xls', '.csv', '.txt']);
+const VAGUE = new Set(['application/octet-stream', 'binary/octet-stream', '']);
 
 const storage = multer.diskStorage({
   destination(_req, _file, cb) {
@@ -32,10 +41,15 @@ export const upload = multer({
   storage,
   limits: { fileSize: config.maxUploadMb * 1024 * 1024, files: 8 },
   fileFilter(_req, file, cb) {
-    if (!ALLOWED.has(file.mimetype)) {
-      return cb(bad(`Unsupported file type: ${file.mimetype}`));
-    }
-    return cb(null, true);
+    if (ALLOWED.has(file.mimetype)) return cb(null, true);
+
+    const ext = path.extname(file.originalname || '').toLowerCase();
+    if (VAGUE.has(file.mimetype) && ALLOWED_EXT.has(ext)) return cb(null, true);
+
+    return cb(bad(
+      `Unsupported file type: ${file.mimetype || 'unknown'}. `
+      + `Accepted: ${[...ALLOWED_EXT].join(', ')}`,
+    ));
   },
 });
 

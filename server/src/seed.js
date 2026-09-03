@@ -6,13 +6,15 @@ import { q, tx, nextCounter } from './db.js';
 import { hash } from './auth.js';
 import { today, addDays, periodDays } from './util.js';
 
+// Three roles: supervisor, admin (Admin / Director) and finance.
+// Two Admin / Director accounts, so that the rule against approving your own
+// request is demonstrable rather than theoretical.
 const USERS = [
-  ['Admin', 'admin@quantum.test', 'admin', 'Quantum@123'],
   ['Ramesh Yadav', 'supervisor@quantum.test', 'supervisor', 'Quantum@123'],
   ['Sunita Rao', 'supervisor2@quantum.test', 'supervisor', 'Quantum@123'],
-  ['Anil Mehta', 'manager@quantum.test', 'senior_manager', 'Quantum@123'],
-  ['Vikram Singh', 'director@quantum.test', 'director', 'Quantum@123'],
-  ['Priya Nair', 'accounts@quantum.test', 'accounts', 'Quantum@123'],
+  ['Vikram Singh', 'director@quantum.test', 'admin', 'Quantum@123'],
+  ['Anil Mehta', 'admin@quantum.test', 'admin', 'Quantum@123'],
+  ['Priya Nair', 'finance@quantum.test', 'finance', 'Quantum@123'],
 ];
 
 const FIRST = ['Rajesh', 'Suresh', 'Mahesh', 'Dinesh', 'Naresh', 'Prakash', 'Vinod', 'Sanjay',
@@ -39,6 +41,7 @@ function reset() {
     'campaign_recipients', 'campaigns', 'tally_exports', 'payroll_lines', 'payroll_periods',
     'petty_cash', 'expenses', 'advances', 'payment_batches', 'insurance', 'attendance',
     'employments', 'screenings', 'driver_references', 'drivers', 'attachments',
+    'salary_components', 'salary_structures', 'app_settings',
     'audit_log', 'counters', 'users',
   ];
   tables.forEach((t) => q.run(`DELETE FROM ${t}`));
@@ -54,6 +57,74 @@ function seedUsers() {
   return Object.fromEntries(
     q.all('SELECT id, role, email FROM users').map((u) => [u.email.split('@')[0], u.id]),
   );
+}
+
+/**
+ * The salary master: one structure per category named in the scope. The real
+ * figures come from the client -- these are placeholders with a realistic
+ * shape so the wage register and the payment sheet have something to compute.
+ */
+const STRUCTURES = [
+  {
+    code: 'HZL-STD', name: 'HZL Driver — Standard', category: 'HZL',
+    effective_from: '2025-04-01', ot_rate_hour: 95,
+    notes: 'Placeholder figures — replace with the structure supplied by the client.',
+    components: [
+      ['Basic', 'earning', 'fixed', 13200, 1],
+      ['HRA', 'earning', 'percent_of_basic', 20, 1],
+      ['Conveyance Allowance', 'earning', 'fixed', 1600, 1],
+      ['Site Allowance', 'earning', 'fixed', 2400, 1],
+      ['Washing Allowance', 'earning', 'fixed', 600, 0],
+      ['Provident Fund', 'deduction', 'percent_of_basic', 12, 1],
+      ['ESIC', 'deduction', 'percent_of_gross', 0.75, 1],
+      ['Professional Tax', 'deduction', 'fixed', 200, 0],
+    ],
+  },
+  {
+    code: 'MKT-STD', name: 'Market Driver — Standard', category: 'MARKET',
+    effective_from: '2025-04-01', ot_rate_hour: 80,
+    notes: 'Placeholder figures — replace with the structure supplied by the client.',
+    components: [
+      ['Basic', 'earning', 'fixed', 11000, 1],
+      ['HRA', 'earning', 'percent_of_basic', 20, 1],
+      ['Conveyance Allowance', 'earning', 'fixed', 1200, 1],
+      ['Provident Fund', 'deduction', 'percent_of_basic', 12, 1],
+      ['ESIC', 'deduction', 'percent_of_gross', 0.75, 1],
+      ['Professional Tax', 'deduction', 'fixed', 200, 0],
+    ],
+  },
+];
+
+function seedSalaryMaster(users) {
+  const ids = {};
+  STRUCTURES.forEach((st) => {
+    const id = q.insert(
+      `INSERT INTO salary_structures(code, name, category, effective_from, ot_rate_hour, notes, created_by)
+       VALUES (?,?,?,?,?,?,?)`,
+      st.code, st.name, st.category, st.effective_from, st.ot_rate_hour, st.notes, users.admin,
+    );
+    st.components.forEach(([name, kind, calc, value, prorated], i) => {
+      q.run(
+        `INSERT INTO salary_components(structure_id, seq, name, kind, calc, value, prorated)
+         VALUES (?,?,?,?,?,?,?)`,
+        id, i, name, kind, calc, value, prorated,
+      );
+    });
+    // Headline monthly gross, the same way salary-master.js computes it.
+    const comps = q.all('SELECT * FROM salary_components WHERE structure_id = ?', id);
+    const basic = Number(comps.find((c) => /^basic/i.test(c.name))?.value || 0);
+    let gross = 0;
+    comps.filter((c) => c.kind === 'earning').forEach((c) => {
+      if (c.calc === 'fixed') gross += Number(c.value);
+      else if (c.calc === 'percent_of_basic') gross += (basic * Number(c.value)) / 100;
+    });
+    comps.filter((c) => c.kind === 'earning' && c.calc === 'percent_of_gross').forEach((c) => {
+      gross += (gross * Number(c.value)) / 100;
+    });
+    q.run('UPDATE salary_structures SET monthly_gross = ? WHERE id = ?', Math.round(gross * 100) / 100, id);
+    ids[st.code] = { id, gross: Math.round(gross * 100) / 100, category: st.category };
+  });
+  return ids;
 }
 
 function seedDrivers(users) {
@@ -120,7 +191,7 @@ function seedDrivers(users) {
         covered ? `${t}/2026/${between(10000, 99999)}` : null,
         covered ? `${new Date().getFullYear()}-04-01` : null,
         covered ? `${new Date().getFullYear() + 1}-03-31` : null,
-        users.accounts,
+        users.finance,
       );
     });
 
@@ -134,15 +205,18 @@ function seedDrivers(users) {
   return drivers;
 }
 
-function seedDeployments(drivers, users) {
+function seedDeployments(drivers, users, structures) {
   const now = today();
   let clientId = 400100;
   const deployed = [];
+  // Roughly two thirds are on the HZL structure, the rest on Market.
+  const structureList = [structures['HZL-STD'], structures['HZL-STD'], structures['MKT-STD']];
 
   drivers.filter((d) => d.outcome === 'passed').forEach((d, idx) => {
     const doj = addDays(d.registeredOn, between(5, 20));
     if (doj > now) return;
-    const wage = between(17, 26) * 1000;
+    const structure = structureList[idx % structureList.length];
+    const wage = structure.gross;
     const location = pick(LOCATIONS);
 
     // Roughly one in seven has left and rejoined on a fresh client ID — the
@@ -154,22 +228,22 @@ function seedDeployments(drivers, users) {
         clientId += 1;
         const first = q.insert(
           `INSERT INTO employments(driver_id, client_id, date_of_joining, date_of_leaving,
-            vehicle_number, location, monthly_wage, status, exit_reason, created_by)
-           VALUES (?,?,?,?,?,?,?, 'ended', ?, ?)`,
+            vehicle_number, location, monthly_wage, salary_structure_id, status, exit_reason, created_by)
+           VALUES (?,?,?,?,?,?,?,?, 'ended', ?, ?)`,
           d.id, String(clientId), doj, leftOn,
           `${pick(['DL', 'HR', 'MH', 'KA'])}${between(10, 99)}${pick(['AB', 'CD', 'EF'])}${between(1000, 9999)}`,
-          location, wage, 'Went to native place', users.supervisor,
+          location, wage, structure.id, 'Went to native place', users.supervisor,
         );
         clientId += 1;
         const rejoinOn = addDays(leftOn, between(20, 70));
         if (rejoinOn < now) {
           const second = q.insert(
             `INSERT INTO employments(driver_id, client_id, date_of_joining, vehicle_number,
-              location, monthly_wage, created_by)
-             VALUES (?,?,?,?,?,?,?)`,
+              location, monthly_wage, salary_structure_id, created_by)
+             VALUES (?,?,?,?,?,?,?,?)`,
             d.id, String(clientId), rejoinOn,
             `${pick(['DL', 'HR', 'MH', 'KA'])}${between(10, 99)}${pick(['AB', 'CD', 'EF'])}${between(1000, 9999)}`,
-            location, wage + 1000, users.supervisor,
+            location, wage + 1000, structure.id, users.supervisor,
           );
           q.run("UPDATE drivers SET status = 'deployed' WHERE id = ?", d.id);
           deployed.push({ ...d, empId: second, doj: rejoinOn, wage: wage + 1000, location });
@@ -184,11 +258,11 @@ function seedDeployments(drivers, users) {
     clientId += 1;
     const empId = q.insert(
       `INSERT INTO employments(driver_id, client_id, date_of_joining, vehicle_number, location,
-        monthly_wage, created_by)
-       VALUES (?,?,?,?,?,?,?)`,
+        monthly_wage, salary_structure_id, created_by)
+       VALUES (?,?,?,?,?,?,?,?)`,
       d.id, String(clientId), doj,
       `${pick(['DL', 'HR', 'MH', 'KA'])}${between(10, 99)}${pick(['AB', 'CD', 'EF'])}${between(1000, 9999)}`,
-      location, wage, users.supervisor,
+      location, wage, structure.id, users.supervisor,
     );
     q.run("UPDATE drivers SET status = 'deployed' WHERE id = ?", d.id);
     deployed.push({ ...d, empId, doj, wage, location });
@@ -236,8 +310,7 @@ function seedFinance(deployed, users) {
 
   // Advances across every stage of the approval chain.
   const stages = [
-    { status: 'pending_sm', n: 4 },
-    { status: 'pending_director', n: 3 },
+    { status: 'pending_approval', n: 7 },
     { status: 'approved', n: 6 },
     { status: 'paid', n: 12 },
     { status: 'rejected', n: 2 },
@@ -255,15 +328,10 @@ function seedFinance(deployed, users) {
         d.id, d.empId, amount, pick(REASONS), requestDate, status,
         users.supervisor, rand() > 0.5 ? 'NOON' : 'EVENING', `${requestDate} 10:${between(10, 59)}:00`,
       );
-      if (['pending_director', 'approved', 'paid'].includes(status)) {
-        q.run(
-          "UPDATE advances SET sm_by = ?, sm_at = ?, sm_remarks = 'Verified with supervisor' WHERE id = ?",
-          users.manager, `${requestDate} 12:30:00`, id,
-        );
-      }
       if (['approved', 'paid'].includes(status)) {
         q.run(
-          "UPDATE advances SET director_by = ?, director_at = ?, director_remarks = 'Approved' WHERE id = ?",
+          `UPDATE advances SET approved_by = ?, approved_at = ?,
+                  approval_remarks = 'Verified with supervisor and approved' WHERE id = ?`,
           users.director, `${addDays(requestDate, 1)} 11:00:00`, id,
         );
       }
@@ -275,8 +343,9 @@ function seedFinance(deployed, users) {
       }
       if (status === 'rejected') {
         q.run(
-          "UPDATE advances SET sm_by = ?, sm_at = ?, sm_remarks = 'Previous advance not yet recovered' WHERE id = ?",
-          users.manager, `${requestDate} 15:00:00`, id,
+          `UPDATE advances SET approved_by = ?, approved_at = ?,
+                  approval_remarks = 'Previous advance not yet recovered' WHERE id = ?`,
+          users.director, `${requestDate} 15:00:00`, id,
         );
       }
     }
@@ -286,8 +355,8 @@ function seedFinance(deployed, users) {
   const expenses = [
     ['Safety shoes for new joiners', 'safety_shoe', 2400, 'expense', 'petty_cash', 'settled'],
     ['Medical check-up reimbursement', 'medical', 1800, 'reimbursement', 'petty_cash', 'approved'],
-    ['Uniform set — 6 drivers', 'uniform', 5400, 'expense', 'accounts', 'pending_director'],
-    ['Cab washing and detailing', 'repair', 900, 'expense', 'petty_cash', 'pending_sm'],
+    ['Uniform set — 6 drivers', 'uniform', 5400, 'expense', 'accounts', 'pending_approval'],
+    ['Cab washing and detailing', 'repair', 900, 'expense', 'petty_cash', 'pending_approval'],
     ['First-aid kits for the fleet', 'other', 3200, 'expense', 'accounts', 'approved'],
     ['Local travel for document collection', 'travel', 650, 'reimbursement', 'petty_cash', 'settled'],
     ['Tyre replacement — emergency', 'repair', 7800, 'expense', 'accounts', 'settled'],
@@ -302,19 +371,17 @@ function seedFinance(deployed, users) {
       d?.id ?? null, purpose, category, amount, kind, route, requestDate, status,
       users.supervisor, `${requestDate} 09:${between(10, 59)}:00`,
     );
-    if (status !== 'pending_sm') {
-      q.run("UPDATE expenses SET sm_by = ?, sm_at = ?, sm_remarks = 'Checked' WHERE id = ?",
-        users.manager, `${requestDate} 14:00:00`, id);
-    }
-    if (['approved', 'settled'].includes(status) && amount >= 3000) {
-      q.run("UPDATE expenses SET director_by = ?, director_at = ? WHERE id = ?",
-        users.director, `${addDays(requestDate, 1)} 10:00:00`, id);
+    if (status !== 'pending_approval') {
+      q.run(
+        "UPDATE expenses SET approved_by = ?, approved_at = ?, approval_remarks = 'Checked and approved' WHERE id = ?",
+        users.director, `${requestDate} 14:00:00`, id,
+      );
     }
     if (status === 'settled') {
       const settledOn = addDays(requestDate, 2);
       q.run(
         `UPDATE expenses SET settled_at = ?, settled_by = ?, paid_amount = ?, txn_ref = ? WHERE id = ?`,
-        settledOn, route === 'petty_cash' ? users.supervisor : users.accounts, amount,
+        settledOn, route === 'petty_cash' ? users.supervisor : users.finance, amount,
         `TXN${between(10000000, 99999999)}`, id,
       );
       if (route === 'petty_cash') {
@@ -332,7 +399,7 @@ function seedFinance(deployed, users) {
     q.run(
       `INSERT INTO petty_cash(supervisor_id, direction, amount, note, entry_date, created_by)
        VALUES (?, 'issue', ?, 'Monthly petty cash float', ?, ?)`,
-      sup, 15000, `${now.slice(0, 7)}-01`, users.accounts,
+      sup, 15000, `${now.slice(0, 7)}-01`, users.finance,
     );
   });
 }
@@ -344,7 +411,7 @@ function seedCampaign(users) {
     'Safety refresher — Saturday',
     'Namaste {{name}}, safety refresher training is on Saturday 9 AM at {{location}}. ' +
       'Please report on time with your ID {{client_id}}. — Quantum',
-    JSON.stringify({ deployedOnly: true }), 0, 0, users.manager,
+    JSON.stringify({ deployedOnly: true }), 0, 0, users.admin,
   );
   const recipients = q.all(
     `SELECT d.id, d.phone FROM drivers d JOIN employments e ON e.driver_id = d.id AND e.status = 'active'`,
@@ -363,13 +430,15 @@ console.log('Seeding Quantum Driver Management…');
 tx(() => {
   reset();
   const users = seedUsers();
+  const structures = seedSalaryMaster(users);
   const drivers = seedDrivers(users);
-  const deployed = seedDeployments(drivers, users);
+  const deployed = seedDeployments(drivers, users, structures);
   seedAttendance(deployed, users);
   seedFinance(deployed, users);
   seedCampaign(users);
 
   console.log(`  users:       ${USERS.length}`);
+  console.log(`  salary master: ${STRUCTURES.length} structures (HZL, Market)`);
   console.log(`  drivers:     ${drivers.length}`);
   console.log(`  deployments: ${deployed.length}`);
   console.log(`  advances:    ${q.scalar('SELECT count(*) FROM advances')}`);

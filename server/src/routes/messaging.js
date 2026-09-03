@@ -106,7 +106,7 @@ router.get(
  */
 router.post(
   '/campaigns',
-  allow('supervisor', 'senior_manager', 'director'),
+  allow('supervisor'),
   h(async (req, res) => {
     need(req.body, ['title', 'body']);
     const audience = req.body.audience || {};
@@ -141,7 +141,7 @@ router.post(
 
 router.post(
   '/campaigns/:id/send',
-  allow('supervisor', 'senior_manager', 'director'),
+  allow('supervisor'),
   h(async (req, res) => {
     const c = q.get('SELECT * FROM campaigns WHERE id = ?', Number(req.params.id));
     if (!c) throw notFound('Campaign not found');

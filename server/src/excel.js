@@ -5,14 +5,21 @@ export const XLSX_MIME =
 
 /**
  * Build a single-sheet workbook.
+ *
  * columns: [{ header, key, width, numFmt }]
+ * freezeColumns: how many leading columns to keep on screen when the sheet is
+ *   scrolled sideways. A register with a column per day of the month runs well
+ *   past the width of a screen, and without this the driver's name and
+ *   registration number scroll away and the codes belong to nobody.
  */
-export async function buildWorkbook({ sheetName = 'Sheet1', title, columns, rows, notes = [] }) {
+export async function buildWorkbook({
+  sheetName = 'Sheet1', title, columns, rows, notes = [], freezeColumns = 0,
+}) {
   const wb = new ExcelJS.Workbook();
   wb.creator = 'Quantum Driver Management';
   wb.created = new Date();
   const ws = wb.addWorksheet(sheetName, {
-    views: [{ state: 'frozen', ySplit: title ? 2 : 1 }],
+    views: [{ state: 'frozen', xSplit: freezeColumns, ySplit: title ? 2 : 1 }],
   });
 
   if (title) {
@@ -64,11 +71,16 @@ export async function readWorkbook(filePath) {
   const ws = wb.worksheets[0];
   if (!ws) return { headers: [], rows: [] };
 
-  // Find the header row: the first row that has at least two non-empty cells.
+  // Find the header row: the first row with at least two *different* non-empty
+  // cells. The workbooks this app generates open with a merged title row, and a
+  // merged cell reports the same value in every column it spans — so a row of
+  // identical values is a title, not a header.
   let headerRowIdx = 1;
   for (let i = 1; i <= Math.min(ws.rowCount, 10); i += 1) {
-    const vals = (ws.getRow(i).values || []).filter((v) => v !== null && v !== undefined && v !== '');
-    if (vals.length >= 2) {
+    const vals = (ws.getRow(i).values || [])
+      .filter((v) => v !== null && v !== undefined && v !== '')
+      .map((v) => String(cellValueText(v)).trim());
+    if (vals.length >= 2 && new Set(vals).size >= 2) {
       headerRowIdx = i;
       break;
     }
@@ -94,11 +106,29 @@ export async function readWorkbook(filePath) {
     });
     if (hasValue) rows.push({ __row: i, ...obj });
   }
+
+  // Every workbook this app generates ends with a few lines of instructions,
+  // written into the first column below the data. Excel hands those back as
+  // ordinary rows, and without this they are read as records — an upload of an
+  // unmodified download would report the instructions as missing drivers.
+  // A genuine row in any of these registers carries several columns, so a
+  // trailing row with only one populated cell is a note, not data.
+  while (rows.length && populatedFields(rows[rows.length - 1]) <= 1) rows.pop();
+
   return { headers: headers.filter(Boolean), rows };
 }
 
-function cellText(cell) {
-  const v = cell?.value;
+/** How many real values a parsed row carries, ignoring the row-number marker. */
+function populatedFields(row) {
+  return Object.entries(row).filter(
+    ([k, v]) => k !== '__row' && v !== '' && v !== null && v !== undefined,
+  ).length;
+}
+
+const cellText = (cell) => cellValueText(cell?.value);
+
+/** Flatten whatever ExcelJS put in a cell into something comparable. */
+function cellValueText(v) {
   if (v === null || v === undefined) return '';
   if (typeof v === 'object') {
     if (v instanceof Date) return v.toISOString().slice(0, 10);

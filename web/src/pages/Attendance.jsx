@@ -18,6 +18,7 @@ export default function Attendance() {
   const [pending, setPending] = useState({}); // "empId|day" -> code
   const [saving, setSaving] = useState(false);
   const [bulkFor, setBulkFor] = useState(null);
+  const [uploadOpen, setUploadOpen] = useState(false);
 
   const locations = useAsync(() => api.get('/drivers/locations'), []);
   const { data, loading, error, reload } = useAsync(
@@ -25,7 +26,7 @@ export default function Attendance() {
     [period, location, search],
   );
 
-  const editable = can('supervisor', 'senior_manager');
+  const editable = can('supervisor');
   const pendingCount = Object.keys(pending).length;
 
   const days = data?.days || [];
@@ -90,6 +91,9 @@ export default function Attendance() {
               {saving ? <span className="spinner" /> : `Save ${pendingCount} change${pendingCount === 1 ? '' : 's'}`}
             </button>
           </>
+        )}
+        {editable && (
+          <button onClick={() => setUploadOpen(true)}>⭱ Bulk upload</button>
         )}
         <button onClick={() => api.download(`/attendance/export?period=${period}`, `attendance-${period}.xlsx`)}>
           ⭳ Export
@@ -160,7 +164,8 @@ export default function Attendance() {
                         <div className="stack">
                           <Link to={`/drivers/${row.driver_id}`}><b>{row.name}</b></Link>
                           <span className="muted small">
-                            <span className="mono">{row.client_id}</span>
+                            <span className="mono">{row.registration_no}</span>
+                            {row.client_id && <> · <span className="mono">{row.client_id}</span></>}
                             {row.vehicle_number && ` · ${row.vehicle_number}`}
                             {row.location && ` · ${row.location}`}
                           </span>
@@ -171,7 +176,16 @@ export default function Attendance() {
                         const key = `${row.employment_id}|${day}`;
                         const code = pending[key] || cell?.code;
                         if (!cell?.applicable) {
-                          return <td key={day}><span className="att-cell na" title="Outside deployment period" /></td>;
+                          // A day that has not happened yet is simply empty; a
+                          // day outside the deployment is struck out.
+                          return (
+                            <td key={day}>
+                              <span
+                                className={`att-cell ${cell?.future ? 'future' : 'na'}`}
+                                title={cell?.future ? 'Not yet — this day has not happened' : 'Outside deployment period'}
+                              />
+                            </td>
+                          );
                         }
                         const future = day > today();
                         return (
@@ -208,9 +222,11 @@ export default function Attendance() {
       </Card>
 
       <p className="small muted">
-        Cells shown faintly are the default — an unmarked day for a deployed driver counts as
-        <b> P (Driving/Present)</b>. A cell marked <b>*</b> is an unsaved change. Marking <b>LE</b> closes
-        the deployment on that date and stops billing.
+        Cells shown faintly are the default — an unmarked day that has <i>already passed</i> counts as
+        <b> P (Driving/Present)</b> for a deployed driver. An empty dashed cell is a day that has not
+        happened yet, and a hatched cell falls outside the driver's deployment; neither carries
+        attendance, here or in the export. A cell marked <b>*</b> is an unsaved change. Marking
+        <b> LE</b> closes the deployment on that date and stops billing.
       </p>
 
       {bulkFor && (
@@ -220,7 +236,126 @@ export default function Attendance() {
           onDone={(n) => { setBulkFor(null); toast.success(`${n} day(s) updated`); reload(); }}
         />
       )}
+
+      {uploadOpen && (
+        <BulkUploadModal
+          period={period}
+          onClose={() => setUploadOpen(false)}
+          onDone={() => { setUploadOpen(false); reload(); }}
+        />
+      )}
     </Page>
+  );
+}
+
+/**
+ * "Pls put provision to upload bulk attendance of drivers if required."
+ *
+ * Download the month as a sheet, edit it offline, upload it back. The upload
+ * is checked first and the changes are shown before anything is written, so a
+ * wrong month or a stray column never lands silently on the register.
+ */
+function BulkUploadModal({ period, onClose, onDone }) {
+  const toast = useToast();
+  const [file, setFile] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [preview, setPreview] = useState(null);
+
+  async function send(commit) {
+    setBusy(true);
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      fd.append('period', period);
+      if (commit) fd.append('commit', 'true');
+      const res = await api.upload('/attendance/upload', fd);
+
+      if (commit) {
+        toast.success(`${res.saved} attendance day(s) saved from the sheet`);
+        if (res.errors?.length) {
+          toast.error(`${res.errors.length} row(s) were refused — ${res.errors[0].reason}`);
+        }
+        onDone();
+      } else {
+        setPreview(res);
+        if (!res.changes) toast.info('The sheet matches what is already on the register.');
+      }
+    } catch (err) {
+      toast.error(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal
+      wide
+      title={`Bulk attendance upload — ${periodLabel(period)}`}
+      onClose={onClose}
+      footer={(
+        <>
+          <button onClick={onClose}>Cancel</button>
+          <button onClick={() => send(false)} disabled={busy || !file}>
+            {busy ? <span className="spinner" /> : 'Check the file'}
+          </button>
+          <button className="primary" onClick={() => send(true)} disabled={busy || !file || !preview?.changes}>
+            {preview?.changes ? `Apply ${preview.changes} change(s)` : 'Apply'}
+          </button>
+        </>
+      )}
+    >
+      <ol className="steps-list">
+        <li>
+          Download the month, pre-filled with every deployed driver and their current marks.
+          <div style={{ marginTop: 6 }}>
+            <button onClick={() => api.download(
+              `/attendance/template?period=${period}`, `attendance-upload-${period}.xlsx`,
+            )}>⭳ Download the template</button>
+          </div>
+        </li>
+        <li>
+          Edit the day columns only. Leave a cell blank to leave that day alone, and do not touch the
+          <b> Deployment ID</b> column — it is how each row is matched.
+        </li>
+        <li>
+          Upload it back and check the summary before applying.
+          <div style={{ marginTop: 6 }}>
+            <input type="file" accept=".xlsx,.xls,.csv" onChange={(e) => {
+              setFile(e.target.files[0]);
+              setPreview(null);
+            }} />
+          </div>
+        </li>
+      </ol>
+
+      {preview && (
+        <div className={`banner ${preview.changes ? 'success' : ''}`} style={{ marginTop: 12 }}>
+          <span>{preview.changes ? '✓' : 'ℹ'}</span>
+          <div style={{ flex: 1 }}>
+            <b>{preview.message}</b>
+            <div className="small muted" style={{ marginTop: 4 }}>
+              {preview.marks} cell(s) read across {preview.drivers} driver(s).
+            </div>
+            {preview.rejected?.length > 0 && (
+              <table className="tbl" style={{ marginTop: 8 }}>
+                <thead><tr><th>Row</th><th>Driver</th><th>Day</th><th>Why it was skipped</th></tr></thead>
+                <tbody>
+                  {preview.rejected.slice(0, 8).map((r, i) => (
+                    <tr key={i}>
+                      <td>{r.row}</td><td>{r.driver}</td><td>{r.day || '—'}</td><td>{r.reason}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </div>
+      )}
+
+      <p className="small muted">
+        Codes: {CODES.map((c) => `${c} = ${LABEL[c]}`).join('   ·   ')}
+      </p>
+    </Modal>
   );
 }
 

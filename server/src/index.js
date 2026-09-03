@@ -14,6 +14,8 @@ import insuranceRoutes from './routes/insurance.js';
 import advanceRoutes from './routes/advances.js';
 import expenseRoutes from './routes/expenses.js';
 import salaryRoutes from './routes/salary.js';
+import salaryMasterRoutes from './routes/salary-master.js';
+import settingsRoutes from './routes/settings.js';
 import tallyRoutes from './routes/tally.js';
 import messagingRoutes from './routes/messaging.js';
 import miscRoutes from './routes/misc.js';
@@ -34,8 +36,10 @@ app.use('/api/insurance', insuranceRoutes);
 app.use('/api/advances', advanceRoutes);
 app.use('/api/expenses', expenseRoutes);
 app.use('/api/salary', salaryRoutes);
+app.use('/api/salary-master', salaryMasterRoutes);
 app.use('/api/tally', tallyRoutes);
 app.use('/api/messaging', messagingRoutes);
+app.use('/api', settingsRoutes);
 app.use('/api', miscRoutes);
 
 // Serve the built SPA when it exists (production single-origin deployment).

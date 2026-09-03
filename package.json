@@ -8,7 +8,10 @@
     "dev": "concurrently -n api,web -c cyan,magenta \"npm run dev --prefix server\" \"npm run dev --prefix web\"",
     "seed": "npm run seed --prefix server",
     "build": "npm run build --prefix web",
-    "start": "npm run start --prefix server"
+    "start": "npm run start --prefix server",
+    "test:extraction": "npm run test:extraction --prefix server",
+    "test:api": "npm run test:api --prefix server",
+    "scope-status": "npm run scope-status --prefix server"
   },
   "devDependencies": {
     "concurrently": "^9.1.0"

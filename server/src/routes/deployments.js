@@ -1,7 +1,8 @@
 import { Router } from 'express';
 import { q, tx, audit } from '../db.js';
 import { authenticate, allow } from '../auth.js';
-import { h, need, bad, notFound, isDate, today, diffDays, humanDuration } from '../util.js';
+import { loadStructure } from './salary-master.js';
+import { h, need, bad, notFound, isDate, today, diffDays, humanDuration, digits, money } from '../util.js';
 
 const router = Router();
 router.use(authenticate);
@@ -46,7 +47,7 @@ router.get(
  */
 router.post(
   '/',
-  allow('supervisor', 'senior_manager'),
+  allow('supervisor'),
   h(async (req, res) => {
     need(req.body, ['driver_id', 'client_id', 'date_of_joining']);
     const driverId = Number(req.body.driver_id);
@@ -86,27 +87,80 @@ router.post(
       );
     }
 
+    // "Once driver is deployed, it is linked to a salary structure."
+    const structure = loadStructure(req.body.salary_structure_id);
+    if (req.body.salary_structure_id && !structure) throw notFound('Salary structure not found');
+    if (!structure && !req.body.monthly_wage) {
+      throw bad(
+        'Pick a salary structure from the salary master, or enter a monthly wage for this deployment.',
+        { code: 'NO_SALARY_STRUCTURE' },
+      );
+    }
+    if (structure && !structure.active) {
+      throw bad(`Salary structure ${structure.code} is no longer active — pick a current one.`);
+    }
+
+    // "Point 10 and 11 can be populated in deployment step" — the bank details
+    // and the UAN. This is the last point at which they can be supplied, so
+    // they are taken here and written back onto the driver.
+    const bankPatch = {};
+    if (req.body.bank_account_no) bankPatch.bank_account_no = digits(req.body.bank_account_no);
+    if (req.body.bank_ifsc) bankPatch.bank_ifsc = String(req.body.bank_ifsc).toUpperCase().trim();
+    if (req.body.bank_name) bankPatch.bank_name = String(req.body.bank_name).trim();
+    if (req.body.bank_account_name) bankPatch.bank_account_name = String(req.body.bank_account_name).trim();
+    if (req.body.uan_no) bankPatch.uan_no = digits(req.body.uan_no);
+
+    if (bankPatch.bank_ifsc && !/^[A-Z]{4}0[A-Z0-9]{6}$/.test(bankPatch.bank_ifsc)) {
+      throw bad('IFSC code must be 11 characters, e.g. SBIN0004521');
+    }
+
+    const merged = { ...driver, ...bankPatch };
+    if ((!merged.bank_account_no || !merged.bank_ifsc) && !req.body.allow_missing_bank) {
+      throw bad(
+        'Bank account number and IFSC are needed before a driver can be paid. Supply them here, '
+          + 'or deploy with allow_missing_bank and add them before the first payment run.',
+        { code: 'MISSING_BANK_DETAILS' },
+      );
+    }
+
     const id = tx(() => {
       const empId = q.insert(
         `INSERT INTO employments
-           (driver_id, client_id, date_of_joining, vehicle_number, location, monthly_wage, created_by)
-         VALUES (?,?,?,?,?,?,?)`,
+           (driver_id, client_id, date_of_joining, vehicle_number, location, monthly_wage,
+            salary_structure_id, created_by)
+         VALUES (?,?,?,?,?,?,?,?)`,
         driverId,
         clientId,
         doj,
         req.body.vehicle_number ? String(req.body.vehicle_number).toUpperCase().replace(/\s/g, '') : null,
         req.body.location || null,
-        Number(req.body.monthly_wage) || 0,
+        // The structure sets the wage unless one is entered explicitly.
+        money(req.body.monthly_wage || structure?.monthly_gross || 0),
+        structure?.id || null,
         req.user.id,
       );
-      q.run("UPDATE drivers SET status = 'deployed', updated_at = datetime('now') WHERE id = ?", driverId);
-      audit(req.user.id, 'employment', empId, 'deployed', { clientId, doj, driverId });
+      if (Object.keys(bankPatch).length) {
+        q.run(
+          `UPDATE drivers SET ${Object.keys(bankPatch).map((k) => `${k} = ?`).join(', ')},
+                  updated_at = datetime('now') WHERE id = ?`,
+          ...Object.values(bankPatch), driverId,
+        );
+      }
+      q.run(
+        `UPDATE drivers SET status = 'deployed', rejection_reason = NULL, rejected_on = NULL,
+                updated_at = datetime('now') WHERE id = ?`,
+        driverId,
+      );
+      audit(req.user.id, 'employment', empId, 'deployed', {
+        clientId, doj, driverId, salaryStructure: structure?.code || null,
+      });
       return empId;
     });
 
     const priorStints = q.scalar('SELECT count(*) FROM employments WHERE driver_id = ?', driverId);
     res.status(201).json({
       employment: q.get('SELECT * FROM employments WHERE id = ?', id),
+      salaryStructure: structure ? { code: structure.code, name: structure.name } : null,
       rejoin: Number(priorStints) > 1,
       message:
         Number(priorStints) > 1
@@ -118,15 +172,23 @@ router.post(
 
 router.patch(
   '/:id',
-  allow('supervisor', 'senior_manager', 'accounts'),
+  allow('supervisor', 'finance'),
   h(async (req, res) => {
     const emp = q.get('SELECT * FROM employments WHERE id = ?', Number(req.params.id));
     if (!emp) throw notFound('Deployment not found');
 
     const patch = {};
-    ['vehicle_number', 'location', 'monthly_wage', 'date_of_joining'].forEach((k) => {
+    ['vehicle_number', 'location', 'monthly_wage', 'date_of_joining', 'salary_structure_id'].forEach((k) => {
       if (req.body[k] !== undefined) patch[k] = req.body[k];
     });
+    if (patch.salary_structure_id) {
+      // "Driver's deployed vehicle and location are changed" is the common
+      // edit, but a structure change has to point at a real structure.
+      const structure = loadStructure(patch.salary_structure_id);
+      if (!structure) throw notFound('Salary structure not found');
+      patch.salary_structure_id = structure.id;
+      if (req.body.monthly_wage === undefined) patch.monthly_wage = structure.monthly_gross;
+    }
     if (patch.date_of_joining && !isDate(patch.date_of_joining)) throw bad('Date of joining must be YYYY-MM-DD');
     if (patch.vehicle_number) patch.vehicle_number = String(patch.vehicle_number).toUpperCase().replace(/\s/g, '');
     if (patch.monthly_wage !== undefined) patch.monthly_wage = Number(patch.monthly_wage) || 0;
@@ -144,7 +206,7 @@ router.patch(
 /** End a stint — resignation or removal. Attendance is closed off with LE. */
 router.post(
   '/:id/end',
-  allow('supervisor', 'senior_manager'),
+  allow('supervisor'),
   h(async (req, res) => {
     const emp = q.get('SELECT * FROM employments WHERE id = ?', Number(req.params.id));
     if (!emp) throw notFound('Deployment not found');
@@ -187,6 +249,63 @@ router.post(
       employment: q.get('SELECT * FROM employments WHERE id = ?', emp.id),
       totalService: { days, label: humanDuration(days), stints: stints.length },
     });
+  }),
+);
+
+/**
+ * "Or its rejected... and capture reason of rejection."
+ *
+ * The client declines to issue an ID. No employment is created; the driver is
+ * marked rejected with the reason on record, and stays in the system so the
+ * decision is auditable and the person can be put forward again later.
+ */
+router.post(
+  '/reject',
+  allow('supervisor'),
+  h(async (req, res) => {
+    need(req.body, ['driver_id', 'reason']);
+    const driverId = Number(req.body.driver_id);
+    const driver = q.get('SELECT * FROM drivers WHERE id = ?', driverId);
+    if (!driver) throw notFound('Driver not found');
+    if (driver.status === 'deployed') {
+      throw bad('This driver is currently deployed — end the deployment instead of rejecting them.');
+    }
+
+    const on = req.body.rejected_on || today();
+    if (!isDate(on)) throw bad('rejected_on must be YYYY-MM-DD');
+    const reason = String(req.body.reason).trim();
+    if (reason.length < 3) throw bad('Record the reason the client gave for the rejection');
+
+    q.run(
+      `UPDATE drivers SET status = 'rejected', rejection_reason = ?, rejected_on = ?,
+              updated_at = datetime('now') WHERE id = ?`,
+      reason, on, driverId,
+    );
+    audit(req.user.id, 'driver', driverId, 'rejected', { reason, on });
+    res.json(q.get('SELECT * FROM drivers WHERE id = ?', driverId));
+  }),
+);
+
+/** Put a rejected driver back in the pipeline. */
+router.post(
+  '/reject/:driverId/withdraw',
+  allow('supervisor'),
+  h(async (req, res) => {
+    const driverId = Number(req.params.driverId);
+    const driver = q.get('SELECT * FROM drivers WHERE id = ?', driverId);
+    if (!driver) throw notFound('Driver not found');
+    if (driver.status !== 'rejected') throw bad('This driver is not marked rejected');
+
+    const screenings = q.all('SELECT type, status FROM screenings WHERE driver_id = ?', driverId);
+    const passedAll = SCREENING_TYPES.every((t) => screenings.find((x) => x.type === t)?.status === 'passed');
+
+    q.run(
+      `UPDATE drivers SET status = ?, rejection_reason = NULL, rejected_on = NULL,
+              updated_at = datetime('now') WHERE id = ?`,
+      passedAll ? 'cleared' : 'in_screening', driverId,
+    );
+    audit(req.user.id, 'driver', driverId, 'rejection_withdrawn');
+    res.json(q.get('SELECT * FROM drivers WHERE id = ?', driverId));
   }),
 );
 

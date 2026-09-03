@@ -91,7 +91,7 @@ router.get(
 /** Update one policy for one driver (the tick-box / dropdown in the UI). */
 router.put(
   '/:driverId/:type',
-  allow('supervisor', 'senior_manager', 'accounts'),
+  allow('supervisor', 'finance'),
   h(async (req, res) => {
     const driverId = Number(req.params.driverId);
     if (!q.get('SELECT id FROM drivers WHERE id = ?', driverId)) throw notFound('Driver not found');
@@ -161,6 +161,7 @@ router.get(
       : [...base, ...TYPES.flatMap((t) => [
         { header: t, key: t, width: 8 },
         { header: `${t} Policy No`, key: `${t} Policy No`, width: 18 },
+        { header: `${t} Valid From`, key: `${t} Valid From`, width: 14 },
         { header: `${t} Valid To`, key: `${t} Valid To`, width: 13 },
       ])];
 
@@ -177,6 +178,7 @@ router.get(
           const c = byDriver.get(d.id)?.[t];
           row[t] = c?.covered ? 'Yes' : 'No';
           row[`${t} Policy No`] = c?.policy_no || '';
+          row[`${t} Valid From`] = c?.valid_from || '';
           row[`${t} Valid To`] = c?.valid_to || '';
         });
       }
@@ -192,8 +194,10 @@ router.get(
       columns,
       rows,
       notes: [
-        'Edit the Yes/No, policy number and validity columns and upload this file back to update coverage in bulk.',
+        'Edit the Yes/No, policy number and the Valid From / Valid To columns, then upload this file '
+          + 'back to update coverage in bulk. Dates may be written as YYYY-MM-DD or DD/MM/YYYY.',
         'Registration No (or Client ID) identifies the driver — do not change those columns.',
+        'A blank policy number or date leaves the value already on record untouched.',
       ],
     });
     res.setHeader('Content-Type', XLSX_MIME);
@@ -208,7 +212,7 @@ router.get(
 /** Bulk update coverage from an uploaded sheet. */
 router.post(
   '/import',
-  allow('senior_manager', 'accounts'),
+  allow('supervisor', 'finance'),
   upload.single('file'),
   h(async (req, res) => {
     if (!req.file) throw bad('No file uploaded');
@@ -232,6 +236,10 @@ router.post(
       return undefined;
     };
 
+    /** Is this column present in the uploaded sheet at all? */
+    const hasColumn = (name) =>
+      headers.some((h) => String(h).trim().toLowerCase() === name.toLowerCase());
+
     const results = { updated: 0, skipped: 0, errors: [] };
     const changes = [];
 
@@ -253,38 +261,81 @@ router.post(
           return;
         }
 
+        /**
+         * Apply one policy for this driver.
+         *
+         * The sheet is authoritative for every column it actually carries: a
+         * cell the supervisor cleared clears the stored value, because the
+         * sheet they downloaded and edited *is* the state they want. A column
+         * that is not in the sheet at all is left alone, so a cut-down sheet
+         * with only the Yes/No columns does not wipe policy numbers.
+         */
         const applyType = (t) => {
-          const raw = forcedType && t === forcedType ? key(row, 'Covered', t) : key(row, t);
-          if (raw === undefined) return false;
-          const covered = yes(raw);
-          const policyNo = String(
-            (forcedType && t === forcedType ? key(row, 'Policy No') : key(row, `${t} Policy No`)) ?? '',
-          ).trim() || null;
-          const validTo = (forcedType && t === forcedType ? key(row, 'Valid To') : key(row, `${t} Valid To`));
-          const validFrom = forcedType && t === forcedType ? key(row, 'Valid From') : undefined;
+          const single = forcedType && t === forcedType;
+          const coveredCol = single ? 'Covered' : t;
+          const policyCol = single ? 'Policy No' : `${t} Policy No`;
+          const fromCol = single ? 'Valid From' : `${t} Valid From`;
+          const toCol = single ? 'Valid To' : `${t} Valid To`;
 
-          changes.push({ driver: driver.name, type: t, covered: Boolean(covered), policy_no: policyNo });
+          // Nothing about this policy in the sheet: not this row's business.
+          if (!hasColumn(coveredCol)) return false;
+
+          const existing = q.get(
+            'SELECT * FROM insurance WHERE driver_id = ? AND type = ?', driver.id, t,
+          ) || {};
+
+          // A blank cell in a column the sheet carries means "clear this".
+          const fromSheet = (col, current, transform = (v) => v) => {
+            if (!hasColumn(col)) return current ?? null;
+            const raw = key(row, col);
+            const text = raw === undefined || raw === null ? '' : String(raw).trim();
+            return text === '' ? null : transform(text);
+          };
+
+          const covered = yes(key(row, coveredCol));
+          const policyNo = fromSheet(policyCol, existing.policy_no);
+          const validFrom = fromSheet(fromCol, existing.valid_from, toIsoDate);
+          const validTo = fromSheet(toCol, existing.valid_to, toIsoDate);
+
+          const before = {
+            covered: Boolean(existing.covered),
+            policy_no: existing.policy_no ?? null,
+            valid_from: existing.valid_from ?? null,
+            valid_to: existing.valid_to ?? null,
+          };
+          const after = {
+            covered: Boolean(covered), policy_no: policyNo, valid_from: validFrom, valid_to: validTo,
+          };
+          const changed = Object.keys(after).some((k) => before[k] !== after[k]);
+
+          changes.push({
+            driver: driver.name, type: t, changed, ...after,
+            was: changed ? before : undefined,
+          });
+
           if (!dryRun) {
             q.run(
               `INSERT INTO insurance(driver_id, type, covered, policy_no, valid_from, valid_to, updated_by)
                VALUES (?,?,?,?,?,?,?)
                ON CONFLICT(driver_id, type) DO UPDATE SET
                  covered = excluded.covered,
-                 policy_no = COALESCE(excluded.policy_no, insurance.policy_no),
-                 valid_from = COALESCE(excluded.valid_from, insurance.valid_from),
-                 valid_to = COALESCE(excluded.valid_to, insurance.valid_to),
+                 policy_no = excluded.policy_no,
+                 valid_from = excluded.valid_from,
+                 valid_to = excluded.valid_to,
                  updated_by = excluded.updated_by, updated_at = datetime('now')`,
-              driver.id, t, covered, policyNo,
-              validFrom ? toIsoDate(validFrom) : null,
-              validTo ? toIsoDate(validTo) : null,
-              req.user.id,
+              driver.id, t, covered, policyNo, validFrom, validTo, req.user.id,
             );
           }
           return true;
         };
 
+        const before = changes.length;
         const touched = (forcedType ? [forcedType] : TYPES).map(applyType).some(Boolean);
-        if (touched) results.updated += 1;
+        const rowChanged = changes.slice(before).some((c) => c.changed);
+        if (touched) {
+          results.updated += 1;
+          if (rowChanged) results.changed = (results.changed || 0) + 1;
+        }
         else {
           results.skipped += 1;
           results.errors.push({ row: row.__row, error: 'No recognised policy column on this row' });

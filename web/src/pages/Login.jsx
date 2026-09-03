@@ -1,16 +1,15 @@
 import React, { useState } from 'react';
-import { useAuth, useToast, Field } from '../lib/ui.jsx';
+import { useAuth, useBranding, useToast, Field } from '../lib/ui.jsx';
 
 const DEMO = [
   ['supervisor@quantum.test', 'Supervisor', 'Ramesh Yadav'],
-  ['manager@quantum.test', 'Senior Manager', 'Anil Mehta'],
-  ['director@quantum.test', 'Director', 'Vikram Singh'],
-  ['accounts@quantum.test', 'Accounts', 'Priya Nair'],
-  ['admin@quantum.test', 'Administrator', 'Admin'],
+  ['director@quantum.test', 'Admin / Director', 'Vikram Singh'],
+  ['finance@quantum.test', 'Finance', 'Priya Nair'],
 ];
 
 export default function Login() {
   const { signIn } = useAuth();
+  const brand = useBranding();
   const toast = useToast();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -31,8 +30,9 @@ export default function Login() {
   return (
     <div className="login-page">
       <form className="login-card" onSubmit={submit}>
-        <h1>Quantum</h1>
-        <p className="muted" style={{ marginTop: 0 }}>Driver Attendance &amp; Management</p>
+        {brand.logoUrl && <img className="brand-logo" src={brand.logoUrl} alt="" />}
+        <h1>{brand.appName}</h1>
+        <p className="muted" style={{ marginTop: 0 }}>{brand.tagline}</p>
 
         <Field label="Email">
           <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoFocus required />

@@ -50,6 +50,44 @@ export function AuthProvider({ children }) {
 
 export const useAuth = () => useContext(AuthCtx);
 
+// --------------------------------------------------------------- branding
+/**
+ * The trading name and logo are client-supplied and editable in Settings, so
+ * they are fetched rather than hard-coded. The endpoint is public because the
+ * sign-in screen has to render before anyone has a session.
+ */
+const BrandCtx = createContext(null);
+
+const FALLBACK_BRAND = { appName: 'Quantum', tagline: 'Driver Attendance & Management', logoUrl: null };
+
+export function BrandingProvider({ children }) {
+  const [brand, setBrand] = useState(FALLBACK_BRAND);
+
+  const load = useCallback(() => {
+    api.get('/branding')
+      .then((b) => setBrand({ ...FALLBACK_BRAND, ...b }))
+      .catch(() => setBrand(FALLBACK_BRAND));
+  }, []);
+
+  useEffect(() => {
+    load();
+    const onChanged = () => load();
+    window.addEventListener('qdm:branding-changed', onChanged);
+    return () => window.removeEventListener('qdm:branding-changed', onChanged);
+  }, [load]);
+
+  useEffect(() => {
+    document.title = `${brand.appName} — ${brand.tagline}`;
+  }, [brand]);
+
+  return <BrandCtx.Provider value={brand}>{children}</BrandCtx.Provider>;
+}
+
+export const useBranding = () => useContext(BrandCtx) || FALLBACK_BRAND;
+
+/** Settings calls this after saving so every screen picks the change up. */
+export const brandingChanged = () => window.dispatchEvent(new CustomEvent('qdm:branding-changed'));
+
 // ----------------------------------------------------------------- toasts
 const ToastCtx = createContext(null);
 
@@ -127,11 +165,23 @@ export function Modal({ title, children, onClose, footer, wide }) {
   );
 }
 
-export function Field({ label, hint, children }) {
+/**
+ * A labelled input.
+ *
+ * `required` marks the field with an asterisk, matching the starred fields of
+ * the scope document. `error` puts the field in an error state and prints the
+ * reason underneath — shown only once the field has been touched, so a form
+ * does not open covered in red.
+ */
+export function Field({ label, hint, error, required, children }) {
   return (
-    <label className="field">
-      <span>{label} {hint && <span className="hint">{hint}</span>}</span>
+    <label className={`field${error ? ' invalid' : ''}`}>
+      <span>
+        {label}{required && <b className="req" title="Mandatory">*</b>}
+        {hint && <span className="hint">{hint}</span>}
+      </span>
       {children}
+      {error && <span className="err">{error}</span>}
     </label>
   );
 }

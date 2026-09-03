@@ -6,6 +6,7 @@ import { saveBuffer } from '../files.js';
 import { buildWorkbook, XLSX_MIME } from '../excel.js';
 import {
   h, need, bad, notFound, forbidden, isDate, today, money, num, cutoffFor,
+  periodDays, daysInPeriod,
 } from '../util.js';
 
 const router = Router();
@@ -16,25 +17,88 @@ const SELECT = `
          d.bank_account_no, d.bank_ifsc, d.bank_name, d.bank_account_name,
          e.client_id, e.location, e.vehicle_number,
          ru.name AS requested_by_name, ru.role AS requested_by_role,
-         su.name AS sm_by_name, du.name AS director_by_name,
+         au.name AS approved_by_name,
          b.method AS batch_method, b.batch_date AS batch_date, b.status AS batch_status
   FROM advances a
   JOIN drivers d ON d.id = a.driver_id
   LEFT JOIN employments e ON e.id = a.employment_id
   LEFT JOIN users ru ON ru.id = a.requested_by
-  LEFT JOIN users su ON su.id = a.sm_by
-  LEFT JOIN users du ON du.id = a.director_by
+  LEFT JOIN users au ON au.id = a.approved_by
   LEFT JOIN payment_batches b ON b.id = a.batch_id`;
 
 /** What this user can act on right now. */
 function actionsFor(user, adv) {
   return {
-    canApproveSm: adv.status === 'pending_sm' && is(user, 'senior_manager'),
-    canApproveDirector: adv.status === 'pending_director' && is(user, 'director'),
-    canPay: adv.status === 'approved' && is(user, 'accounts'),
-    canCancel:
-      ['pending_sm', 'pending_director'].includes(adv.status) &&
-      (adv.requested_by === user.id || is(user, 'senior_manager', 'director')),
+    // Admin / Director is the approver, but never of a request they raised.
+    canApprove:
+      adv.status === 'pending_approval' && is(user, 'admin') && adv.requested_by !== user.id,
+    canPay: adv.status === 'approved' && is(user, 'finance'),
+    canCancel: adv.status === 'pending_approval' && (adv.requested_by === user.id || is(user, 'admin')),
+  };
+}
+
+/**
+ * "While approving, the approver should be able to see how much advance has
+ * been given to the driver for the month and how much salary is accrued as per
+ * attendance." Both numbers are computed here and travel with every request.
+ */
+export function approvalContext(driverId, onDate = today()) {
+  const period = onDate.slice(0, 7);
+  const monthStart = `${period}-01`;
+
+  const advancesThisMonth = money(Number(q.scalar(
+    `SELECT COALESCE(sum(amount), 0) FROM advances
+      WHERE driver_id = ? AND request_date BETWEEN ? AND ?
+        AND status IN ('pending_approval','approved','paid')`,
+    driverId, monthStart, onDate,
+  )));
+  const outstanding = money(Number(q.scalar(
+    `SELECT COALESCE(sum(amount - recovered), 0) FROM advances
+      WHERE driver_id = ? AND status IN ('approved','paid')`,
+    driverId,
+  )));
+
+  const emp = q.get(
+    `SELECT * FROM employments WHERE driver_id = ?
+      ORDER BY (status = 'active') DESC, date_of_joining DESC LIMIT 1`,
+    driverId,
+  );
+
+  let accrued = { payableDays: 0, ratePerDay: 0, accruedSalary: 0, monthlyWage: 0 };
+  if (emp) {
+    const days = periodDays(period);
+    const marks = Object.fromEntries(
+      q.all(
+        'SELECT day, code FROM attendance WHERE employment_id = ? AND day BETWEEN ? AND ?',
+        emp.id, days[0], days[days.length - 1],
+      ).map((m) => [m.day, m.code]),
+    );
+    // Unmarked days for a deployed driver count as P, exactly as payroll does.
+    let payableDays = 0;
+    days.forEach((d) => {
+      if (d > onDate) return;
+      if (d < emp.date_of_joining) return;
+      if (emp.date_of_leaving && d > emp.date_of_leaving) return;
+      payableDays += config.rules.payableCodes[marks[d] || 'P'] ?? 0;
+    });
+    const monthlyWage = Number(emp.monthly_wage || 0);
+    const ratePerDay = money(monthlyWage / daysInPeriod(period));
+    accrued = {
+      payableDays,
+      ratePerDay,
+      monthlyWage: money(monthlyWage),
+      accruedSalary: money(ratePerDay * payableDays),
+    };
+  }
+
+  return {
+    period,
+    asOn: onDate,
+    advancesThisMonth,
+    outstanding,
+    ...accrued,
+    // What is left of this month's earnings once advances are taken off.
+    headroom: money(accrued.accruedSalary - advancesThisMonth),
   };
 }
 
@@ -86,23 +150,24 @@ router.get(
 /** Counts for the approval inbox badges. */
 router.get('/inbox', h(async (req, res) => {
   res.json({
-    pending_sm: Number(q.scalar("SELECT count(*) FROM advances WHERE status = 'pending_sm'")),
-    pending_director: Number(q.scalar("SELECT count(*) FROM advances WHERE status = 'pending_director'")),
+    pending_approval: Number(q.scalar(
+      "SELECT count(*) FROM advances WHERE status = 'pending_approval'",
+    )),
     approved_unpaid: Number(q.scalar("SELECT count(*) FROM advances WHERE status = 'approved'")),
     my_requests: Number(q.scalar(
-      "SELECT count(*) FROM advances WHERE requested_by = ? AND status IN ('pending_sm','pending_director')",
+      "SELECT count(*) FROM advances WHERE requested_by = ? AND status = 'pending_approval'",
       req.user.id,
     )),
   });
 }));
 
 /**
- * Supervisor raises the request on the driver's behalf.
- * A request raised by a Senior Manager skips straight to the Director.
+ * The supervisor raises the request on the driver's behalf, once convinced of
+ * it. It then sits with Admin / Director for approval, and Finance pays.
  */
 router.post(
   '/',
-  allow('supervisor', 'senior_manager'),
+  allow('supervisor'),
   h(async (req, res) => {
     need(req.body, ['driver_id', 'amount', 'reason']);
     const driver = q.get('SELECT * FROM drivers WHERE id = ?', Number(req.body.driver_id));
@@ -115,68 +180,76 @@ router.post(
     const emp = q.get("SELECT * FROM employments WHERE driver_id = ? AND status = 'active'", driver.id);
     if (!emp) throw bad('Advances can only be raised for a currently deployed driver');
 
-    const outstanding = Number(q.scalar(
-      `SELECT COALESCE(sum(amount - recovered), 0) FROM advances
-       WHERE driver_id = ? AND status IN ('approved','paid')`, driver.id,
-    ));
-
-    // A Senior Manager's own request cannot be self-approved at the SM step.
-    const status = req.user.role === 'senior_manager' ? 'pending_director' : 'pending_sm';
+    const context = approvalContext(driver.id, requestDate);
 
     const id = q.insert(
       `INSERT INTO advances(driver_id, employment_id, amount, reason, request_date, status,
                             requested_by, cutoff)
        VALUES (?,?,?,?,?,?,?,?)`,
-      driver.id, emp.id, amount, String(req.body.reason).trim(), requestDate, status,
+      driver.id, emp.id, amount, String(req.body.reason).trim(), requestDate, 'pending_approval',
       req.user.id, cutoffFor(),
     );
-    if (status === 'pending_director') {
-      q.run(
-        "UPDATE advances SET sm_by = ?, sm_at = datetime('now'), sm_remarks = ? WHERE id = ?",
-        req.user.id, 'Raised by Senior Manager — routed to Director', id,
-      );
-    }
     audit(req.user.id, 'advance', id, 'raised', { amount, driver: driver.name });
 
     res.status(201).json({
       advance: q.get(`${SELECT} WHERE a.id = ?`, id),
-      outstandingBefore: money(outstanding),
-      nextApprover: status === 'pending_sm' ? 'Senior Manager' : 'Director',
+      context,
+      nextApprover: 'Admin / Director',
     });
   }),
 );
 
-/** Approve / reject at whichever step the request is currently sitting. */
+/** Approve / reject. Admin / Director is the sole approver. */
 router.post(
   '/:id/decision',
-  allow('senior_manager', 'director'),
+  allow('admin'),
   h(async (req, res) => {
     const adv = q.get('SELECT * FROM advances WHERE id = ?', Number(req.params.id));
     if (!adv) throw notFound('Advance request not found');
-    const approve = req.body.decision === 'approve';
     if (!['approve', 'reject'].includes(req.body.decision)) throw bad('decision must be approve or reject');
+    const approve = req.body.decision === 'approve';
     const remarks = req.body.remarks || null;
 
-    if (adv.status === 'pending_sm') {
-      if (!is(req.user, 'senior_manager')) throw forbidden('This request is awaiting Senior Manager approval');
-      if (adv.requested_by === req.user.id) throw forbidden('You cannot approve your own request');
-      q.run(
-        `UPDATE advances SET status = ?, sm_by = ?, sm_at = datetime('now'), sm_remarks = ? WHERE id = ?`,
-        approve ? 'pending_director' : 'rejected', req.user.id, remarks, adv.id,
-      );
-    } else if (adv.status === 'pending_director') {
-      if (!is(req.user, 'director')) throw forbidden('This request is awaiting Director approval');
-      q.run(
-        `UPDATE advances SET status = ?, director_by = ?, director_at = datetime('now'),
-                             director_remarks = ? WHERE id = ?`,
-        approve ? 'approved' : 'rejected', req.user.id, remarks, adv.id,
-      );
-    } else {
+    if (adv.status !== 'pending_approval') {
       throw bad(`This request is ${adv.status} and cannot be actioned`);
     }
+    if (adv.requested_by === req.user.id) {
+      throw forbidden(
+        'You cannot approve a request you raised yourself — another Admin / Director must action it',
+      );
+    }
+
+    q.run(
+      `UPDATE advances SET status = ?, approved_by = ?, approved_at = datetime('now'),
+                           approval_remarks = ? WHERE id = ?`,
+      approve ? 'approved' : 'rejected', req.user.id, remarks, adv.id,
+    );
 
     audit(req.user.id, 'advance', adv.id, approve ? 'approved' : 'rejected', { remarks });
-    res.json(q.get(`${SELECT} WHERE a.id = ?`, adv.id));
+    res.json({
+      ...q.get(`${SELECT} WHERE a.id = ?`, adv.id),
+      context: approvalContext(adv.driver_id, adv.request_date),
+    });
+  }),
+);
+
+/** Everything the approver needs to see before deciding on one request. */
+router.get(
+  '/:id/context',
+  h(async (req, res) => {
+    const adv = q.get('SELECT * FROM advances WHERE id = ?', Number(req.params.id));
+    if (!adv) throw notFound('Advance request not found');
+    res.json(approvalContext(adv.driver_id, adv.request_date));
+  }),
+);
+
+/** Approval context for a driver, before a request even exists. */
+router.get(
+  '/context/:driverId',
+  h(async (req, res) => {
+    const driverId = Number(req.params.driverId);
+    if (!q.get('SELECT id FROM drivers WHERE id = ?', driverId)) throw notFound('Driver not found');
+    res.json(approvalContext(driverId, req.query.on || today()));
   }),
 );
 
@@ -185,13 +258,11 @@ router.post(
   h(async (req, res) => {
     const adv = q.get('SELECT * FROM advances WHERE id = ?', Number(req.params.id));
     if (!adv) throw notFound('Advance request not found');
-    if (!['pending_sm', 'pending_director'].includes(adv.status)) {
-      throw bad('Only a pending request can be withdrawn');
+    if (adv.status !== 'pending_approval') throw bad('Only a pending request can be withdrawn');
+    if (adv.requested_by !== req.user.id && !is(req.user, 'admin')) {
+      throw forbidden('Only the requester or an Admin / Director can withdraw this request');
     }
-    if (adv.requested_by !== req.user.id && !is(req.user, 'senior_manager', 'director')) {
-      throw forbidden('Only the requester or a manager can withdraw this request');
-    }
-    q.run("UPDATE advances SET status = 'rejected', director_remarks = ? WHERE id = ?",
+    q.run("UPDATE advances SET status = 'rejected', approval_remarks = ? WHERE id = ?",
       req.body.remarks || 'Withdrawn by requester', adv.id);
     audit(req.user.id, 'advance', adv.id, 'withdrawn');
     res.json(q.get(`${SELECT} WHERE a.id = ?`, adv.id));
@@ -205,11 +276,11 @@ router.post(
  */
 router.get(
   '/payable',
-  allow('accounts'),
+  allow('finance'),
   h(async (req, res) => {
     const rows = q.all(
       `${SELECT} WHERE a.status = 'approved' AND a.batch_id IS NULL
-       ORDER BY a.request_date, a.director_at`,
+       ORDER BY a.request_date, a.approved_at`,
     );
     const groups = {};
     rows.forEach((r) => {
@@ -243,7 +314,7 @@ router.get(
 /** Create a payment run from a set of approved requests. */
 router.post(
   '/batches',
-  allow('accounts'),
+  allow('finance'),
   h(async (req, res) => {
     const ids = Array.isArray(req.body.advance_ids) ? req.body.advance_ids.map(Number) : [];
     if (!ids.length) throw bad('Select at least one approved request');
@@ -297,7 +368,7 @@ router.post(
 
 router.get(
   '/batches',
-  allow('accounts', 'senior_manager', 'director'),
+  allow('finance'),
   h(async (req, res) => {
     res.json(
       q.all(
@@ -311,7 +382,7 @@ router.get(
 
 router.get(
   '/batches/:id',
-  allow('accounts', 'senior_manager', 'director'),
+  allow('finance'),
   h(async (req, res) => {
     const batch = q.get('SELECT * FROM payment_batches WHERE id = ?', Number(req.params.id));
     if (!batch) throw notFound('Payment run not found');
@@ -322,7 +393,7 @@ router.get(
 /** Bank upload sheet for a "sheet" batch (>4 requests). */
 router.get(
   '/batches/:id/sheet',
-  allow('accounts'),
+  allow('finance'),
   h(async (req, res) => {
     const batch = q.get('SELECT * FROM payment_batches WHERE id = ?', Number(req.params.id));
     if (!batch) throw notFound('Payment run not found');
@@ -367,7 +438,7 @@ router.get(
 /** Record payment: whole batch, or individual UTRs for netbanking. */
 router.post(
   '/batches/:id/pay',
-  allow('accounts'),
+  allow('finance'),
   h(async (req, res) => {
     const batch = q.get('SELECT * FROM payment_batches WHERE id = ?', Number(req.params.id));
     if (!batch) throw notFound('Payment run not found');
@@ -422,8 +493,8 @@ router.get(
         { header: 'Amount (INR)', key: 'amount', width: 14, numFmt: '#,##0.00' },
         { header: 'Reason', key: 'reason', width: 34 },
         { header: 'Raised By', key: 'requested_by_name', width: 20 },
-        { header: 'SM Approval', key: 'sm_by_name', width: 18 },
-        { header: 'Director Approval', key: 'director_by_name', width: 18 },
+        { header: 'Approved By', key: 'approved_by_name', width: 20 },
+        { header: 'Approved On', key: 'approved_at', width: 18 },
         { header: 'Status', key: 'status', width: 14 },
         { header: 'Paid On', key: 'paid_at', width: 13 },
         { header: 'UTR', key: 'utr', width: 22 },

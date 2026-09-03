@@ -1,0 +1,33 @@
+GREENLINE MOBILITY SOLUTIONS LIMITED
+Driver Registration / Joining Form
+
+Company     : Greenline Mobility Solutions Limited
+Function    : Driver - LNG Prime Mover
+Registered No : 20251225110847
+Client ID   : 704512
+
+Driver Name : AJAY KUMAR
+Father's Name : RAJENDRA PRASAD
+Date of Birth : 14/08/1992
+Mobile No   : 9835472018
+Address     : Village Bariyarpur, Post Chandwara,
+              District Nawada, Bihar
+Pin Code    : 805110
+
+Aadhaar Number : 6421 8837 5104
+Driving Licence No : BR3120180004512
+Valid From  : 06/03/2018
+Valid Till  : 05/03/2038
+
+Bank Name   : State Bank of India
+Account No  : 38914455072
+IFSC Code   : SBIN0004521
+UAN No      : 101234567890
+
+Reference Contacts
+Father  : RAJENDRA PRASAD - 9430118762
+Brother : SANTOSH KUMAR  - 8877102934
+
+Referred By : Ramesh Yadav (Supervisor)
+Vehicle No  : RJ14GB4471
+Location    : Dariba Smelter

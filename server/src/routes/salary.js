@@ -5,6 +5,7 @@ import { authenticate, allow } from '../auth.js';
 import { config } from '../config.js';
 import { upload, saveBuffer } from '../files.js';
 import { buildWorkbook, readWorkbook, XLSX_MIME } from '../excel.js';
+import { loadStructure, computeSalary, CATEGORY_LABEL } from './salary-master.js';
 import {
   h, bad, notFound, isPeriod, periodDays, daysInPeriod, today, money, num, bool, digits,
 } from '../util.js';
@@ -71,7 +72,7 @@ router.get(
  */
 router.post(
   '/periods/:period/collate',
-  allow('accounts', 'senior_manager'),
+  allow('finance'),
   h(async (req, res) => {
     const period = req.params.period;
     const row = getPeriod(period, { create: true, userId: req.user.id });
@@ -86,13 +87,31 @@ router.post(
     );
 
     const monthDays = daysInPeriod(period);
+    // One lookup per structure, not per driver.
+    const structures = new Map();
+    const structureFor = (id) => {
+      if (!id) return null;
+      if (!structures.has(id)) structures.set(id, loadStructure(id));
+      return structures.get(id);
+    };
+
     const summary = tx(() => {
       let gross = 0;
       let net = 0;
       emps.forEach((emp) => {
         const t = tally(emp, period);
-        const rate = money((emp.monthly_wage || 0) / monthDays);
-        const g = money(t.payableDays * rate);
+
+        // A deployment linked to a salary structure is paid component by
+        // component off the master; one without falls back to the flat
+        // monthly wage recorded against the deployment.
+        const structure = structureFor(emp.salary_structure_id);
+        const computed = structure ? computeSalary(structure, t.payableDays, monthDays) : null;
+
+        const rate = computed ? computed.ratePerDay : money((emp.monthly_wage || 0) / monthDays);
+        const g = computed ? computed.gross : money(t.payableDays * rate);
+        const statutory = computed ? computed.statutoryDeduction : 0;
+        const earningsJson = computed ? JSON.stringify(computed.earnings) : null;
+        const deductionsJson = computed ? JSON.stringify(computed.deductions) : null;
 
         // Recover advances that have been paid but not yet recovered.
         const outstanding = Number(q.scalar(
@@ -105,33 +124,50 @@ router.post(
         );
         // Never silently wipe a manual override that has already been reviewed.
         const otherDeduction = existing?.other_deduction ?? 0;
+        const payable = money(g - statutory);
         const advanceDeduction = existing && row.status !== 'draft'
           ? existing.advance_deduction
-          : money(Math.min(outstanding, g));
-        const netPayable = money(g - advanceDeduction - otherDeduction);
+          : money(Math.min(outstanding, payable));
+        const netPayable = money(payable - advanceDeduction - otherDeduction);
 
         q.run(
           `INSERT INTO payroll_lines
              (period_id, employment_id, days_in_period, present_days, training_days, transit_days,
-              leave_days, left_days, payable_days, rate_per_day, gross, advance_deduction,
+              leave_days, left_days, payable_days, rate_per_day, salary_structure_id, structure_code,
+              earnings_json, deductions_json, statutory_deduction, gross, advance_deduction,
               other_deduction, net_payable)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(period_id, employment_id) DO UPDATE SET
              days_in_period = excluded.days_in_period, present_days = excluded.present_days,
              training_days = excluded.training_days, transit_days = excluded.transit_days,
              leave_days = excluded.leave_days, left_days = excluded.left_days,
              payable_days = excluded.payable_days, rate_per_day = excluded.rate_per_day,
+             salary_structure_id = excluded.salary_structure_id,
+             structure_code = excluded.structure_code,
+             earnings_json = excluded.earnings_json, deductions_json = excluded.deductions_json,
+             statutory_deduction = excluded.statutory_deduction,
              gross = excluded.gross, advance_deduction = excluded.advance_deduction,
-             net_payable = excluded.gross - excluded.advance_deduction - payroll_lines.other_deduction
+             net_payable = excluded.gross - excluded.statutory_deduction
+                           - excluded.advance_deduction - payroll_lines.other_deduction
            WHERE payroll_lines.status IN ('pending','held')`,
           row.id, emp.id, t.applicable, t.counts.P, t.counts.T, t.counts.TA, t.counts.L, t.counts.LE,
-          t.payableDays, rate, g, advanceDeduction, otherDeduction, netPayable,
+          t.payableDays, rate, structure?.id || null, structure?.code || null,
+          earningsJson, deductionsJson, statutory, g, advanceDeduction, otherDeduction, netPayable,
         );
         gross += g;
         net += netPayable;
       });
-      audit(req.user.id, 'payroll', period, 'collated', { lines: emps.length });
-      return { lines: emps.length, gross: money(gross), net: money(net) };
+      audit(req.user.id, 'payroll', period, 'collated', {
+        lines: emps.length,
+        onStructure: emps.filter((e) => e.salary_structure_id).length,
+      });
+      return {
+        lines: emps.length,
+        gross: money(gross),
+        net: money(net),
+        onStructure: emps.filter((e) => e.salary_structure_id).length,
+        withoutStructure: emps.filter((e) => !e.salary_structure_id).map((e) => e.name),
+      };
     });
 
     res.json({ period: q.get('SELECT * FROM payroll_periods WHERE period = ?', period), ...summary });
@@ -179,7 +215,7 @@ router.get(
 /** Confirm the collated attendance with the client. */
 router.post(
   '/periods/:period/finalize-attendance',
-  allow('accounts', 'senior_manager'),
+  allow('finance'),
   h(async (req, res) => {
     const row = getPeriod(req.params.period);
     if (!row) throw notFound('Payroll period not found — collate it first');
@@ -198,7 +234,7 @@ router.post(
 /** Edit a single payment line: correct attendance, hold, or adjust deductions. */
 router.patch(
   '/lines/:id',
-  allow('accounts', 'senior_manager'),
+  allow('finance'),
   h(async (req, res) => {
     const line = q.get('SELECT * FROM payroll_lines WHERE id = ?', Number(req.params.id));
     if (!line) throw notFound('Payment line not found');
@@ -231,8 +267,24 @@ router.patch(
     const payableDays =
       Number(merged.present_days) + Number(merged.training_days) + Number(merged.transit_days);
     patch.payable_days = payableDays;
-    patch.gross = money(payableDays * merged.rate_per_day);
-    patch.net_payable = money(patch.gross - merged.advance_deduction - merged.other_deduction);
+
+    // Edited attendance is re-run through the salary structure, so the
+    // component breakdown on the wage register stays true to the days paid.
+    const structure = loadStructure(line.salary_structure_id);
+    if (structure) {
+      const monthDays = daysInPeriod(period.period);
+      const computed = computeSalary(structure, payableDays, monthDays);
+      patch.gross = computed.gross;
+      patch.statutory_deduction = computed.statutoryDeduction;
+      patch.earnings_json = JSON.stringify(computed.earnings);
+      patch.deductions_json = JSON.stringify(computed.deductions);
+    } else {
+      patch.gross = money(payableDays * merged.rate_per_day);
+      patch.statutory_deduction = 0;
+    }
+    patch.net_payable = money(
+      patch.gross - patch.statutory_deduction - merged.advance_deduction - merged.other_deduction,
+    );
     if (patch.net_payable < 0) throw bad('Deductions exceed the gross amount for this driver');
 
     q.run(
@@ -254,9 +306,12 @@ router.get(
 
     const rows = q.all(
       `SELECT l.*, d.name, d.registration_no, d.uan_no, d.bank_account_no, d.bank_ifsc,
-              e.client_id, e.location, e.vehicle_number, e.date_of_joining, e.monthly_wage
+              e.client_id, e.location, e.vehicle_number, e.date_of_joining, e.monthly_wage,
+              s.name AS structure_name, s.category AS structure_category
        FROM payroll_lines l JOIN employments e ON e.id = l.employment_id
-       JOIN drivers d ON d.id = e.driver_id WHERE l.period_id = ? ORDER BY e.location, d.name`,
+       JOIN drivers d ON d.id = e.driver_id
+       LEFT JOIN salary_structures s ON s.id = l.salary_structure_id
+       WHERE l.period_id = ? ORDER BY e.location, d.name`,
       row.id,
     );
 
@@ -272,6 +327,8 @@ router.get(
         { header: 'Location', key: 'location', width: 16 },
         { header: 'Vehicle', key: 'vehicle_number', width: 13 },
         { header: 'DOJ', key: 'date_of_joining', width: 12 },
+        { header: 'Salary Category', key: 'category_label', width: 16 },
+        { header: 'Structure', key: 'structure_code', width: 14 },
         { header: 'Monthly Wage', key: 'monthly_wage', width: 14, numFmt: '#,##0.00' },
         { header: 'Rate / Day', key: 'rate_per_day', width: 12, numFmt: '#,##0.00' },
         { header: 'Present (P)', key: 'present_days', width: 11 },
@@ -280,16 +337,26 @@ router.get(
         { header: 'Leave (L)', key: 'leave_days', width: 10 },
         { header: 'Payable Days', key: 'payable_days', width: 13 },
         { header: 'Gross (INR)', key: 'gross', width: 14, numFmt: '#,##0.00' },
+        { header: 'Statutory Deduction', key: 'statutory_deduction', width: 17, numFmt: '#,##0.00' },
         { header: 'Advance Recovery', key: 'advance_deduction', width: 16, numFmt: '#,##0.00' },
         { header: 'Other Deduction', key: 'other_deduction', width: 15, numFmt: '#,##0.00' },
         { header: 'Net Payable', key: 'net_payable', width: 14, numFmt: '#,##0.00' },
         { header: 'Hold', key: 'hold_label', width: 8 },
         { header: 'Status', key: 'status', width: 10 },
       ],
-      rows: rows.map((r, i) => ({ ...r, sno: i + 1, hold_label: r.hold ? 'HOLD' : '' })),
+      freezeColumns: 4,
+      rows: rows.map((r, i) => ({
+        ...r,
+        sno: i + 1,
+        hold_label: r.hold ? 'HOLD' : '',
+        category_label: CATEGORY_LABEL[r.structure_category] || '—',
+        structure_code: r.structure_code || '—',
+      })),
       notes: [
         `Drivers: ${rows.length}   |   Gross: INR ${money(rows.reduce((s, r) => s + r.gross, 0)).toLocaleString('en-IN')}   |   Net: INR ${money(rows.reduce((s, r) => s + (r.hold ? 0 : r.net_payable), 0)).toLocaleString('en-IN')}`,
         'Payable days = Present + Training + In Transit. Leave and Left days are not billed.',
+        'Salary is computed from the structure linked to each deployment in the salary master; '
+          + 'a dash means the deployment is on a flat monthly wage instead.',
       ],
     });
 
@@ -309,7 +376,7 @@ router.get(
  */
 router.get(
   '/periods/:period/enet-sheet',
-  allow('accounts'),
+  allow('finance'),
   h(async (req, res) => {
     const period = req.params.period;
     const row = getPeriod(period);
@@ -379,7 +446,7 @@ router.get(
 /** Record payment against individual drivers. */
 router.post(
   '/periods/:period/record-payments',
-  allow('accounts'),
+  allow('finance'),
   h(async (req, res) => {
     const row = getPeriod(req.params.period);
     if (!row) throw notFound('Payroll period not found');
@@ -449,7 +516,7 @@ function settleAdvancesFor(periodId) {
  */
 router.post(
   '/periods/:period/bank-statement',
-  allow('accounts'),
+  allow('finance'),
   upload.single('file'),
   h(async (req, res) => {
     const row = getPeriod(req.params.period);
@@ -527,7 +594,7 @@ router.post(
 
 router.post(
   '/periods/:period/close',
-  allow('accounts'),
+  allow('finance'),
   h(async (req, res) => {
     const row = getPeriod(req.params.period);
     if (!row) throw notFound('Payroll period not found');

@@ -1,0 +1,20 @@
+{
+  "name": "AJAY KUMAR",
+  "father_name": "RAJENDRA PRASAD",
+  "phone": "9835472018",
+  "aadhar_no": "642188375104",
+  "dob_aadhar": "1992-08-14",
+  "dl_no": "BR3120180004512",
+  "dl_valid_from": "2018-03-06",
+  "dl_valid_till": "2038-03-05",
+  "bank_account_no": "38914455072",
+  "bank_ifsc": "SBIN0004521",
+  "uan_no": "101234567890",
+  "client_id": "704512",
+  "vehicle_number": "RJ14GB4471",
+  "referred_by": "Ramesh Yadav",
+  "references": [
+    { "relation": "Father", "name": "RAJENDRA PRASAD", "phone": "9430118762" },
+    { "relation": "Brother", "name": "SANTOSH KUMAR", "phone": "8877102934" }
+  ]
+}

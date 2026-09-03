@@ -4,15 +4,43 @@ import { config } from './config.js';
 import { q } from './db.js';
 import { HttpError, forbidden } from './util.js';
 
-export const ROLES = ['admin', 'supervisor', 'senior_manager', 'director', 'accounts'];
+/**
+ * Three roles, as agreed for this build:
+ *   supervisor  -- the field role: registration, screening, deployment,
+ *                  attendance, and raising advance / expense requests.
+ *   admin       -- Admin / Director: approves every advance and expense,
+ *                  owns the salary master, branding and user management.
+ *   finance     -- pays out: advance runs, expense settlements, payroll,
+ *                  bank sheets, bank reconciliation, Tally linkage, petty cash.
+ */
+export const ROLES = ['supervisor', 'admin', 'finance'];
 
 export const ROLE_LABEL = {
-  admin: 'Administrator',
   supervisor: 'Supervisor',
-  senior_manager: 'Senior Manager',
-  director: 'Director',
-  accounts: 'Accounts',
+  admin: 'Admin / Director',
+  finance: 'Finance',
 };
+
+export const ROLE_DESCRIPTION = {
+  supervisor:
+    'Registers drivers, records screening, deploys, marks attendance, raises advance '
+    + 'and expense requests and settles petty cash.',
+  admin:
+    'Approves advances and expenses, maintains the salary master and branding, '
+    + 'manages users, and can do everything the other roles can.',
+  finance:
+    'Advance payment runs, expense settlement, payroll and the wage register, bank '
+    + 'upload sheets, bank reconciliation, Tally linkage and the petty cash float.',
+};
+
+/** Roles used before the consolidation, still accepted on the way in. */
+export const LEGACY_ROLE = {
+  senior_manager: 'admin',
+  director: 'admin',
+  accounts: 'finance',
+};
+
+export const normaliseRole = (role) => LEGACY_ROLE[role] || role;
 
 export const hash = (pw) => bcrypt.hashSync(pw, 10);
 export const verify = (pw, h) => bcrypt.compareSync(pw, h);

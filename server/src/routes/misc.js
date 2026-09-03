@@ -57,14 +57,16 @@ router.get(
     );
 
     const approvals = {
-      advances_pending_sm: Number(q.scalar("SELECT count(*) FROM advances WHERE status = 'pending_sm'")),
-      advances_pending_director: Number(q.scalar("SELECT count(*) FROM advances WHERE status = 'pending_director'")),
+      advances_pending_approval: Number(q.scalar(
+        "SELECT count(*) FROM advances WHERE status = 'pending_approval'",
+      )),
       advances_to_pay: Number(q.scalar("SELECT count(*) FROM advances WHERE status = 'approved'")),
       advances_to_pay_amount: money(Number(q.scalar(
         "SELECT COALESCE(sum(amount),0) FROM advances WHERE status = 'approved'",
       ))),
-      expenses_pending_sm: Number(q.scalar("SELECT count(*) FROM expenses WHERE status = 'pending_sm'")),
-      expenses_pending_director: Number(q.scalar("SELECT count(*) FROM expenses WHERE status = 'pending_director'")),
+      expenses_pending_approval: Number(q.scalar(
+        "SELECT count(*) FROM expenses WHERE status = 'pending_approval'",
+      )),
       expenses_open: Number(q.scalar("SELECT count(*) FROM expenses WHERE status = 'approved'")),
     };
 

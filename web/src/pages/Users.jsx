@@ -4,13 +4,9 @@ import { api } from '../lib/api.js';
 import { useAsync, useAuth, useToast, Card, Field, Modal, Loading, ErrorBanner, Empty } from '../lib/ui.jsx';
 import { date } from '../lib/format.js';
 
-const ROLES = [
-  ['supervisor', 'Supervisor', 'Registers drivers, marks attendance, raises advance and expense requests'],
-  ['senior_manager', 'Senior Manager', 'First approval on advances; final approval on expenses below the threshold'],
-  ['director', 'Director', 'Final approval on advances and on expenses at or above the threshold'],
-  ['accounts', 'Accounts', 'Payment runs, salary, bank sheets, Tally linkage, petty cash'],
-  ['admin', 'Administrator', 'Full access including user management'],
-];
+import { ROLES as ROLE_KEYS, ROLE_LABEL, ROLE_DESCRIPTION } from '../lib/roles.js';
+
+const ROLES = ROLE_KEYS.map((k) => [k, ROLE_LABEL[k], ROLE_DESCRIPTION[k]]);
 
 export default function Users() {
   const { user } = useAuth();
@@ -21,7 +17,7 @@ export default function Users() {
 
   if (user.role !== 'admin') {
     return <Page title="Users"><div className="banner error"><span>⚠</span>
-      <div>User management is limited to administrators.</div></div></Page>;
+      <div>User management is limited to Admin / Director.</div></div></Page>;
   }
 
   async function toggleActive(u) {
@@ -35,7 +31,7 @@ export default function Users() {
   }
 
   return (
-    <Page title="Users & roles" subtitle="Who can do what in the system"
+    <Page title="Users & roles" subtitle="Supervisor · Admin / Director · Finance"
       actions={<button className="primary" onClick={() => setCreating(true)}>+ Add user</button>}>
       <ErrorBanner error={error} onRetry={reload} />
 
@@ -76,7 +72,7 @@ export default function Users() {
           <tbody>
             {ROLES.map(([key, label, desc]) => (
               <tr key={key}>
-                <td style={{ width: 170 }}><b>{label}</b></td>
+                <td style={{ width: 180 }}><b>{label}</b></td>
                 <td className="muted">{desc}</td>
               </tr>
             ))}

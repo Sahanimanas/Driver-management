@@ -17,13 +17,12 @@ const CATEGORIES = ['safety_shoe', 'medical', 'fuel', 'uniform', 'repair', 'trav
 const SELECT = `
   SELECT x.*, d.name AS driver_name, d.registration_no,
          e.client_id, e.location,
-         ru.name AS requested_by_name, su.name AS sm_by_name, du.name AS director_by_name
+         ru.name AS requested_by_name, au.name AS approved_by_name
   FROM expenses x
   LEFT JOIN drivers d ON d.id = x.driver_id
   LEFT JOIN employments e ON e.driver_id = d.id AND e.status = 'active'
   LEFT JOIN users ru ON ru.id = x.requested_by
-  LEFT JOIN users su ON su.id = x.sm_by
-  LEFT JOIN users du ON du.id = x.director_by`;
+  LEFT JOIN users au ON au.id = x.approved_by`;
 
 const withExtras = (row, user) => ({
   ...row,
@@ -32,15 +31,18 @@ const withExtras = (row, user) => ({
     String(row.id),
   ),
   actions: {
-    canApproveSm: row.status === 'pending_sm' && is(user, 'senior_manager'),
-    canApproveDirector: row.status === 'pending_director' && is(user, 'director'),
+    // Admin / Director approves every request, but never one they raised.
+    canApprove:
+      row.status === 'pending_approval' && is(user, 'admin') && row.requested_by !== user.id,
     // Under the threshold the supervisor pays out of petty cash and uploads the
-    // supporting; at or above it accounts pays directly.
+    // supporting; at or above it Finance pays the vendor directly.
     canSettle:
       row.status === 'approved' &&
       (row.route === 'petty_cash'
-        ? row.requested_by === user.id || is(user, 'supervisor', 'accounts')
-        : is(user, 'accounts')),
+        ? row.requested_by === user.id || is(user, 'supervisor', 'finance')
+        : is(user, 'finance')),
+    canCancel:
+      row.status === 'pending_approval' && (row.requested_by === user.id || is(user, 'admin')),
   },
 });
 
@@ -99,8 +101,9 @@ router.get(
 
 router.get('/inbox', h(async (req, res) => {
   res.json({
-    pending_sm: Number(q.scalar("SELECT count(*) FROM expenses WHERE status = 'pending_sm'")),
-    pending_director: Number(q.scalar("SELECT count(*) FROM expenses WHERE status = 'pending_director'")),
+    pending_approval: Number(q.scalar(
+      "SELECT count(*) FROM expenses WHERE status = 'pending_approval'",
+    )),
     open_settlements: Number(q.scalar("SELECT count(*) FROM expenses WHERE status = 'approved'")),
   });
 }));
@@ -116,13 +119,13 @@ router.get(
 
 /**
  * Supervisor raises a purchase requirement / expense payment request.
- * Routing follows the amount: below Rs 3000 the Senior Manager is the final
- * approver and the supervisor pays from petty cash; at or above it the Director
- * also approves and accounts pays directly.
+ * Admin / Director approves it either way; the amount decides who then pays --
+ * below Rs 3000 the supervisor pays from petty cash and uploads the supporting,
+ * at or above it Finance pays the vendor directly.
  */
 router.post(
   '/',
-  allow('supervisor', 'senior_manager'),
+  allow('supervisor'),
   h(async (req, res) => {
     need(req.body, ['purpose', 'amount', 'kind']);
     const amount = money(num(req.body.amount, 'Amount', { min: 1, max: 1000000 }));
@@ -138,11 +141,11 @@ router.post(
       driverId = driver.id;
     }
 
-    const needsDirector = amount >= THRESHOLD;
-    const route = needsDirector ? 'accounts' : 'petty_cash';
-    // A Senior Manager's own request cannot stop at their own approval step, so
-    // it goes straight to the Director whatever the amount.
-    const status = req.user.role === 'senior_manager' ? 'pending_director' : 'pending_sm';
+    // At or above the threshold Finance pays the vendor; below it the
+    // supervisor pays from petty cash and uploads the supporting documents.
+    const payDirect = amount >= THRESHOLD;
+    const route = payDirect ? 'accounts' : 'petty_cash';
+    const status = 'pending_approval';
 
     const id = q.insert(
       `INSERT INTO expenses(driver_id, purpose, category, amount, kind, route, request_date,
@@ -152,28 +155,27 @@ router.post(
       status, req.user.id,
     );
 
-    if (req.user.role === 'senior_manager') {
-      q.run(
-        "UPDATE expenses SET sm_by = ?, sm_at = datetime('now'), sm_remarks = ? WHERE id = ?",
-        req.user.id, 'Raised by Senior Manager', id,
-      );
-    }
     audit(req.user.id, 'expense', id, 'raised', { amount, route });
 
     res.status(201).json({
       expense: withExtras(q.get(`${SELECT} WHERE x.id = ?`, id), req.user),
       route,
-      nextApprover: status === 'pending_sm' ? 'Senior Manager' : 'Director',
-      note: needsDirector
-        ? `Above INR ${THRESHOLD}: Senior Manager and Director approval required, accounts will pay directly.`
-        : `Below INR ${THRESHOLD}: Senior Manager approves, then pay from petty cash and upload the supporting.`,
+      nextApprover: 'Admin / Director',
+      note: payDirect
+        ? `At or above INR ${THRESHOLD}: once approved, Finance pays the vendor directly.`
+        : `Below INR ${THRESHOLD}: once approved, pay from petty cash and upload the supporting.`,
     });
   }),
 );
 
+/**
+ * Approve / reject. Admin / Director is the sole approver; the threshold then
+ * decides the settlement route -- below it the supervisor pays from petty cash,
+ * at or above it Finance pays the vendor directly.
+ */
 router.post(
   '/:id/decision',
-  allow('senior_manager', 'director'),
+  allow('admin'),
   h(async (req, res) => {
     const x = q.get('SELECT * FROM expenses WHERE id = ?', Number(req.params.id));
     if (!x) throw notFound('Expense request not found');
@@ -181,25 +183,20 @@ router.post(
     const approve = req.body.decision === 'approve';
     const remarks = req.body.remarks || null;
 
-    if (x.status === 'pending_sm') {
-      if (!is(req.user, 'senior_manager')) throw forbidden('This request is awaiting Senior Manager approval');
-      if (x.requested_by === req.user.id) throw forbidden('You cannot approve your own request');
-      // Below the threshold the Senior Manager is the final approver.
-      const next = !approve ? 'rejected' : x.amount >= THRESHOLD ? 'pending_director' : 'approved';
-      q.run(
-        "UPDATE expenses SET status = ?, sm_by = ?, sm_at = datetime('now'), sm_remarks = ? WHERE id = ?",
-        next, req.user.id, remarks, x.id,
-      );
-    } else if (x.status === 'pending_director') {
-      if (!is(req.user, 'director')) throw forbidden('This request is awaiting Director approval');
-      q.run(
-        `UPDATE expenses SET status = ?, director_by = ?, director_at = datetime('now'),
-                             director_remarks = ? WHERE id = ?`,
-        approve ? 'approved' : 'rejected', req.user.id, remarks, x.id,
-      );
-    } else {
+    if (x.status !== 'pending_approval') {
       throw bad(`This request is ${x.status} and cannot be actioned`);
     }
+    if (x.requested_by === req.user.id) {
+      throw forbidden(
+        'You cannot approve a request you raised yourself — another Admin / Director must action it',
+      );
+    }
+
+    q.run(
+      `UPDATE expenses SET status = ?, approved_by = ?, approved_at = datetime('now'),
+                           approval_remarks = ? WHERE id = ?`,
+      approve ? 'approved' : 'rejected', req.user.id, remarks, x.id,
+    );
 
     audit(req.user.id, 'expense', x.id, approve ? 'approved' : 'rejected', { remarks });
     res.json(withExtras(q.get(`${SELECT} WHERE x.id = ?`, x.id), req.user));
@@ -241,8 +238,8 @@ router.post(
     if (x.status !== 'approved') throw bad(`Only an approved expense can be settled (this one is ${x.status})`);
 
     const allowed = x.route === 'petty_cash'
-      ? x.requested_by === req.user.id || is(req.user, 'supervisor', 'accounts')
-      : is(req.user, 'accounts');
+      ? x.requested_by === req.user.id || is(req.user, 'supervisor', 'finance')
+      : is(req.user, 'finance');
     if (!allowed) {
       throw forbidden(
         x.route === 'petty_cash'
@@ -288,7 +285,7 @@ router.get(
   h(async (req, res) => {
     const supervisorId = req.query.supervisor_id
       ? Number(req.query.supervisor_id)
-      : is(req.user, 'accounts', 'senior_manager', 'director') ? null : req.user.id;
+      : is(req.user, 'finance') ? null : req.user.id;
 
     const where = supervisorId ? 'WHERE p.supervisor_id = ?' : '';
     const params = supervisorId ? [supervisorId] : [];
@@ -316,7 +313,7 @@ router.get(
 /** Accounts issues petty cash to a supervisor (or takes the balance back). */
 router.post(
   '/petty-cash',
-  allow('accounts'),
+  allow('finance'),
   h(async (req, res) => {
     need(req.body, ['supervisor_id', 'amount']);
     const direction = oneOf(req.body.direction || 'issue', ['issue', 'return'], 'direction');
@@ -362,8 +359,8 @@ router.get(
         { header: 'Amount (INR)', key: 'amount', width: 14, numFmt: '#,##0.00' },
         { header: 'Route', key: 'route', width: 13 },
         { header: 'Raised By', key: 'requested_by_name', width: 20 },
-        { header: 'SM', key: 'sm_by_name', width: 18 },
-        { header: 'Director', key: 'director_by_name', width: 18 },
+        { header: 'Approved By', key: 'approved_by_name', width: 20 },
+        { header: 'Approved On', key: 'approved_at', width: 18 },
         { header: 'Status', key: 'status', width: 12 },
         { header: 'Paid', key: 'paid_amount', width: 12, numFmt: '#,##0.00' },
         { header: 'Settled On', key: 'settled_at', width: 13 },

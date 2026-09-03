@@ -4,3 +4,6 @@ server/data/
 server/.env
 *.log
 .DS_Store
+# OCR language packs are fetched at runtime, not committed
+*.traineddata
+*.traineddata.gz

@@ -158,7 +158,7 @@ input:focus, select:focus, textarea:focus { outline: 2px solid #bcd7f5; border-c
 textarea { resize: vertical; min-height: 76px; }
 label.field { display: block; margin-bottom: 12px; }
 label.field > span { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; font-weight: 550; }
-label.field .hint { font-weight: 400; color: #94a3b8; }
+label.field .hint { font-weight: 400; color: #94a3b8; margin-left: 6px; }
 label.check { display: flex; align-items: center; gap: 7px; font-size: 13px; cursor: pointer; }
 label.check input { width: auto; }
 
@@ -311,3 +311,45 @@ label.check input { width: auto; }
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 .loading { padding: 40px; text-align: center; color: var(--muted); }
+
+/* ---- branding: the client supplies the name and the logo ---- */
+.sidebar .brand-logo {
+  max-width: 132px; max-height: 34px; display: block;
+  margin-bottom: 8px; object-fit: contain;
+}
+.login-card .brand-logo { max-width: 160px; max-height: 44px; margin: 0 auto 10px; display: block; object-fit: contain; }
+
+/* ---- extraction review: fields filled from a scanned page ---- */
+.field-wrap.prefilled > .field > span::after {
+  content: "from scan"; margin-left: 6px; font-size: 10px; font-weight: 600;
+  color: var(--brand); background: #e6f0fb; padding: 1px 6px; border-radius: 8px;
+  text-transform: uppercase; letter-spacing: .05em;
+}
+.field-wrap.prefilled > .field input,
+.field-wrap.prefilled > .field textarea { border-color: #a9c8ea; background: #f7fbff; }
+
+.pick-list { max-height: 320px; overflow: auto; border: 1px solid var(--line); border-radius: var(--radius); }
+.pick-list button {
+  display: flex; width: 100%; gap: 10px; align-items: baseline; text-align: left;
+  padding: 9px 12px; border: 0; border-bottom: 1px solid #eef1f5; background: #fff; cursor: pointer;
+}
+.pick-list button:hover { background: #f2f7fd; }
+.pick-list button:last-child { border-bottom: 0; }
+.pick-list .who { font-weight: 600; }
+
+/* ---- numbered instructions inside a modal ---- */
+ol.steps-list { margin: 0; padding-left: 20px; }
+ol.steps-list li { margin-bottom: 14px; line-height: 1.5; }
+ol.steps-list li:last-child { margin-bottom: 0; }
+
+/* ---- mandatory markers and per-field validation ---- */
+label.field .req { color: var(--red); margin-left: 2px; font-weight: 700; }
+label.field .err { display: block; font-size: 11.5px; color: var(--red); margin-top: 4px; font-weight: 500; }
+label.field.invalid > input,
+label.field.invalid > textarea,
+label.field.invalid > select { border-color: var(--red); background: #fffafa; }
+label.field.invalid > input:focus,
+label.field.invalid > textarea:focus { outline-color: var(--red); }
+
+/* A day that has not happened yet: empty, not struck out. */
+.att-cell.future { background: transparent; border: 1px dashed #e2e8f0; }

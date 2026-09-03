@@ -11,14 +11,14 @@ import StatusChip, { ApprovalSteps } from '../components/StatusChip.jsx';
 export default function Advances() {
   const { can, user } = useAuth();
   const [tab, setTab] = useState(
-    can('accounts') && user.role === 'accounts' ? 'payments' : 'requests',
+    can('finance') && user.role === 'finance' ? 'payments' : 'requests',
   );
 
   return (
-    <Page title="Salary advances" subtitle="Raised by supervisors, approved by management, paid by accounts">
+    <Page title="Salary advances" subtitle="Raised by supervisors, approved by Admin / Director, paid by Finance">
       <div className="tabs">
         <button className={tab === 'requests' ? 'active' : ''} onClick={() => setTab('requests')}>Requests</button>
-        {can('accounts') && (
+        {can('finance') && (
           <>
             <button className={tab === 'payments' ? 'active' : ''} onClick={() => setTab('payments')}>Payment runs</button>
             <button className={tab === 'batches' ? 'active' : ''} onClick={() => setTab('batches')}>Past runs</button>
@@ -39,7 +39,7 @@ export default function Advances() {
 function Requests() {
   const { can, user } = useAuth();
   const toast = useToast();
-  const [status, setStatus] = useState('pending_sm,pending_director,approved');
+  const [status, setStatus] = useState('pending_approval,approved');
   const [newOpen, setNewOpen] = useState(false);
   const [acting, setActing] = useState(null);
 
@@ -51,25 +51,26 @@ function Requests() {
   return (
     <>
       <div className="grid c4" style={{ marginBottom: 16 }}>
-        <Stat tone="amber" label="With Senior Manager" value={inbox.data?.pending_sm ?? '—'} />
-        <Stat tone="accent" label="With Director" value={inbox.data?.pending_director ?? '—'} />
-        <Stat tone="good" label="Approved, to pay" value={inbox.data?.approved_unpaid ?? '—'} />
+        <Stat tone="amber" label="Awaiting approval" value={inbox.data?.pending_approval ?? '—'}
+          foot="with Admin / Director" />
+        <Stat tone="good" label="Approved, to pay" value={inbox.data?.approved_unpaid ?? '—'}
+          foot="with Finance" />
+        <Stat label="My open requests" value={inbox.data?.my_requests ?? '—'} />
         <Stat label="Filtered total" value={data ? inr0(data.totals.amount) : '—'}
           foot={data ? `${data.totals.count} request(s)` : ''} />
       </div>
 
       <div className="toolbar">
         <select value={status} onChange={(e) => setStatus(e.target.value)}>
-          <option value="pending_sm,pending_director,approved">Open requests</option>
-          <option value="pending_sm">With Senior Manager</option>
-          <option value="pending_director">With Director</option>
+          <option value="pending_approval,approved">Open requests</option>
+          <option value="pending_approval">Awaiting approval</option>
           <option value="approved">Approved, awaiting payment</option>
           <option value="paid">Paid</option>
           <option value="rejected">Rejected</option>
           <option value="">All</option>
         </select>
         <div className="spacer" />
-        {can('supervisor', 'senior_manager') && (
+        {can('supervisor') && (
           <button className="primary" onClick={() => setNewOpen(true)}>+ Raise request</button>
         )}
       </div>
@@ -103,14 +104,14 @@ function Requests() {
                     <td className="small">{a.requested_by_name}</td>
                     <td><ApprovalSteps status={a.status} /></td>
                     <td className="right nowrap">
-                      {(a.actions.canApproveSm || a.actions.canApproveDirector) && (
+                      {a.actions.canApprove && (
                         <>
                           <button className="sm good" onClick={() => setActing({ a, decision: 'approve' })}>Approve</button>{' '}
                           <button className="sm danger" onClick={() => setActing({ a, decision: 'reject' })}>Reject</button>
                         </>
                       )}
                       {a.status === 'paid' && <span className="chip green">UTR {a.utr || 'recorded'}</span>}
-                      {a.actions.canCancel && !a.actions.canApproveSm && !a.actions.canApproveDirector && (
+                      {a.actions.canCancel && !a.actions.canApprove && (
                         <button className="sm" onClick={async () => {
                           try {
                             await api.post(`/advances/${a.id}/cancel`, {});
@@ -170,8 +171,8 @@ function NewRequest({ onClose, onDone }) {
       </>}>
       <div className="banner info">
         <span>ℹ</span>
-        <div>Raise the request on the driver's behalf once you are satisfied it is genuine. It goes to
-          the Senior Manager, then the Director, before accounts release payment.</div>
+        <div>Raise the request on the driver's behalf once you are satisfied it is genuine. It goes
+          to Admin / Director for approval, and Finance releases the payment.</div>
       </div>
 
       {driver ? (
@@ -254,12 +255,70 @@ function DecisionModal({ a, decision, onClose, onDone }) {
         <dt>Amount</dt><dd><b>{inr(a.amount)}</b></dd>
         <dt>Reason</dt><dd>{a.reason}</dd>
         <dt>Requested on</dt><dd>{date(a.request_date)} by {a.requested_by_name}</dd>
-        {a.sm_by_name && <><dt>Senior Manager</dt><dd>{a.sm_by_name} — {a.sm_remarks || 'approved'}</dd></>}
       </dl>
+
+      <ApprovalContext advanceId={a.id} amount={a.amount} />
       <Field label="Remarks" hint="optional">
         <textarea value={remarks} onChange={(e) => setRemarks(e.target.value)} style={{ minHeight: 60 }} />
       </Field>
     </Modal>
+  );
+}
+
+/**
+ * "While approving, the approver should be able to see how much advance has
+ * been given to the driver for the month and how much salary is accrued as per
+ * attendance." Both, plus what is left once this request is met.
+ */
+function ApprovalContext({ advanceId, amount }) {
+  const { data, error } = useAsync(() => api.get(`/advances/${advanceId}/context`), [advanceId]);
+
+  if (error) return <div className="banner error"><span>⚠</span><div>{error.message}</div></div>;
+  if (!data) return <div className="loading"><span className="spinner" /> Loading the driver's position…</div>;
+
+  // What this driver has earned so far this month, less what has already been
+  // advanced and what is being asked for now.
+  const afterThis = Math.round((data.headroom - Number(amount)) * 100) / 100;
+  const overdrawn = afterThis < 0;
+
+  return (
+    <div className={`banner ${overdrawn ? 'error' : ''}`} style={{ marginTop: 4 }}>
+      <span>{overdrawn ? '⚠' : '₹'}</span>
+      <div style={{ flex: 1 }}>
+        <table className="tbl">
+          <tbody>
+            <tr>
+              <td>Advances this month ({data.period})</td>
+              <td className="num"><b>{inr(data.advancesThisMonth)}</b></td>
+            </tr>
+            <tr>
+              <td>Salary accrued as per attendance</td>
+              <td className="num">
+                <b>{inr(data.accruedSalary)}</b>
+                <div className="muted small">
+                  {data.payableDays} payable day(s) at {inr(data.ratePerDay)}/day
+                </div>
+              </td>
+            </tr>
+            <tr>
+              <td>Unrecovered advance outstanding</td>
+              <td className="num"><b>{inr(data.outstanding)}</b></td>
+            </tr>
+            <tr>
+              <td><b>Left after this request</b></td>
+              <td className="num">
+                <b style={{ color: overdrawn ? 'var(--red)' : 'var(--green)' }}>{inr(afterThis)}</b>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        {overdrawn && (
+          <div className="small" style={{ marginTop: 6 }}>
+            This request takes the driver past what they have earned so far this month.
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 

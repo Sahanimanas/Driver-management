@@ -27,7 +27,7 @@ export default function Deployments() {
       title="Deployments"
       subtitle="Client ID, date of joining, vehicle and location for every placed driver"
     >
-      {cleared.data?.rows?.length > 0 && can('supervisor', 'senior_manager') && (
+      {cleared.data?.rows?.length > 0 && can('supervisor') && (
         <div className="banner info">
           <span>✓</span>
           <div style={{ flex: 1 }}>
@@ -83,7 +83,7 @@ export default function Deployments() {
                     <td><StatusChip value={e.status} /></td>
                     <td className="nowrap">{e.date_of_leaving ? date(e.date_of_leaving) : '—'}</td>
                     <td className="right">
-                      {e.status === 'active' && can('supervisor', 'senior_manager', 'accounts') && (
+                      {e.status === 'active' && can('supervisor', 'finance') && (
                         <button className="sm" onClick={() => setEditing(e)}>Edit</button>
                       )}
                     </td>
@@ -106,20 +106,30 @@ export default function Deployments() {
   );
 }
 
+/**
+ * Editing a live deployment. The scope's second redeployment case — "driver's
+ * deployed vehicle and location are changed" — is this screen: the client ID
+ * stays, the vehicle and location move.
+ */
 function EditModal({ employment, onClose, onDone }) {
   const toast = useToast();
   const [form, setForm] = useState({
     vehicle_number: employment.vehicle_number || '',
     location: employment.location || '',
     monthly_wage: employment.monthly_wage || 0,
+    salary_structure_id: employment.salary_structure_id || '',
   });
   const [busy, setBusy] = useState(false);
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
 
+  const structures = useAsync(() => api.get('/salary-master?active=true'), []);
+
   async function submit() {
     setBusy(true);
     try {
-      await api.patch(`/deployments/${employment.id}`, form);
+      const payload = { ...form };
+      if (!payload.salary_structure_id) delete payload.salary_structure_id;
+      await api.patch(`/deployments/${employment.id}`, payload);
       onDone();
     } catch (err) {
       toast.error(err);
@@ -127,6 +137,11 @@ function EditModal({ employment, onClose, onDone }) {
       setBusy(false);
     }
   }
+
+  // Changing the structure resets the wage to that structure's gross, so show
+  // what the wage will become rather than leaving the old number on screen.
+  const chosen = (structures.data?.rows || []).find((r) => String(r.id) === String(form.salary_structure_id));
+  const structureChanged = String(form.salary_structure_id || '') !== String(employment.salary_structure_id || '');
 
   return (
     <Modal title={`${employment.name} — ID ${employment.client_id}`} onClose={onClose}
@@ -138,7 +153,28 @@ function EditModal({ employment, onClose, onDone }) {
         <Field label="Vehicle number"><input value={form.vehicle_number} onChange={set('vehicle_number')} /></Field>
         <Field label="Location"><input value={form.location} onChange={set('location')} /></Field>
       </div>
-      <Field label="Monthly wage"><input type="number" value={form.monthly_wage} onChange={set('monthly_wage')} /></Field>
+      <Field label="Salary structure" hint="from the salary master">
+        <select value={form.salary_structure_id} onChange={set('salary_structure_id')}>
+          <option value="">— flat monthly wage, no structure —</option>
+          {(structures.data?.rows || []).map((r) => (
+            <option key={r.id} value={r.id}>
+              {r.name} ({r.code}) — {inr0(r.monthly_gross)}/month
+            </option>
+          ))}
+        </select>
+      </Field>
+      <Field label="Monthly wage">
+        <input type="number" value={form.monthly_wage} onChange={set('monthly_wage')} />
+      </Field>
+      {structureChanged && chosen && (
+        <div className="banner">
+          <span>ℹ</span>
+          <div>
+            Leave the wage as it is and it will be set to {inr0(chosen.monthly_gross)} — the gross of
+            {' '}{chosen.code}. Type a figure to override it for this deployment only.
+          </div>
+        </div>
+      )}
     </Modal>
   );
 }

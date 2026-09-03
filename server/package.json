@@ -7,7 +7,10 @@
   "scripts": {
     "dev": "node --no-warnings --watch src/index.js",
     "start": "node --no-warnings src/index.js",
-    "seed": "node --no-warnings src/seed.js"
+    "seed": "node --no-warnings src/seed.js",
+    "test:extraction": "node --no-warnings src/scripts/test-extraction.js",
+    "test:api": "bash src/scripts/smoke-test.sh",
+    "scope-status": "node --no-warnings src/scripts/scope-status.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
@@ -16,6 +19,7 @@
     "exceljs": "^4.4.0",
     "express": "^4.21.2",
     "jsonwebtoken": "^9.0.2",
-    "multer": "^2.0.0"
+    "multer": "^2.0.0",
+    "tesseract.js": "^7.0.0"
   }
 }

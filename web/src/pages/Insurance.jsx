@@ -26,18 +26,16 @@ export default function Insurance() {
     [search, type, covered],
   );
 
-  const editable = can('supervisor', 'senior_manager', 'accounts');
+  const editable = can('supervisor', 'finance');
 
-  async function toggle(driverId, t, current) {
-    try {
-      await api.put(`/insurance/${driverId}/${t}`, {
-        covered: !current.covered, policy_no: current.policy_no,
-        valid_from: current.valid_from, valid_to: current.valid_to,
-      });
-      reload();
-    } catch (err) {
-      toast.error(err);
-    }
+  /**
+   * Ticking a box in the grid opens the policy details rather than saving on
+   * the spot. Cover is only meaningful alongside a policy number and its
+   * validity, and a stray click on a dense grid should not silently change a
+   * driver's insurance record.
+   */
+  function askToToggle(driver, t) {
+    setEditing({ driver, focus: t, intent: !driver.policies[t].covered });
   }
 
   const setParam = (k, v) => {
@@ -55,7 +53,8 @@ export default function Insurance() {
           `/insurance/export?type=${type}&covered=${covered}`,
           `insurance-${type || 'all'}.xlsx`,
         )}>⭳ Download list</button>
-        {can('senior_manager', 'accounts') && (
+        {/* Whoever may edit coverage on this page may also do it in bulk. */}
+        {editable && (
           <button className="primary" onClick={() => setImportOpen(true)}>⭱ Upload excel</button>
         )}
       </>}
@@ -112,15 +111,19 @@ export default function Insurance() {
                     <td>{d.location || '—'}</td>
                     {TYPES.map((t) => (
                       <td key={t} style={{ textAlign: 'center' }}>
-                        <input type="checkbox" style={{ width: 'auto' }}
+                        <input type="checkbox" style={{ width: 'auto', cursor: editable ? 'pointer' : 'default' }}
                           checked={d.policies[t].covered}
                           disabled={!editable}
-                          title={d.policies[t].policy_no || (d.policies[t].covered ? 'Covered' : 'Not covered')}
-                          onChange={() => toggle(d.id, t, d.policies[t])} />
+                          title={editable
+                            ? `${d.policies[t].covered ? 'Covered' : 'Not covered'}${d.policies[t].policy_no ? ` · ${d.policies[t].policy_no}` : ''} — click to edit the policy`
+                            : (d.policies[t].policy_no || (d.policies[t].covered ? 'Covered' : 'Not covered'))}
+                          onChange={() => askToToggle(d, t)} />
                       </td>
                     ))}
                     <td className="right">
-                      {editable && <button className="sm" onClick={() => setEditing(d)}>Policies</button>}
+                      {editable && (
+                        <button className="sm" onClick={() => setEditing({ driver: d })}>Policies</button>
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -131,26 +134,50 @@ export default function Insurance() {
       </Card>
 
       {importOpen && <ImportModal onClose={() => setImportOpen(false)} onDone={() => { setImportOpen(false); reload(); }} />}
-      {editing && <PolicyModal driver={editing} onClose={() => setEditing(null)}
-        onDone={() => { setEditing(null); reload(); }} />}
+      {editing && (
+        <PolicyModal
+          driver={editing.driver}
+          focus={editing.focus}
+          intent={editing.intent}
+          onClose={() => setEditing(null)}
+          onDone={() => { setEditing(null); reload(); }}
+        />
+      )}
     </Page>
   );
 }
 
-function PolicyModal({ driver, onClose, onDone }) {
+/**
+ * Policy details for one driver.
+ *
+ * `focus` is the policy whose box was clicked in the grid, and `intent` is the
+ * covered state that click was asking for — the modal opens with it already
+ * applied, so the tick is not lost, but nothing is saved until Save is pressed.
+ */
+function PolicyModal({ driver, focus, intent, onClose, onDone }) {
   const toast = useToast();
   const [state, setState] = useState(() => Object.fromEntries(
-    TYPES.map((t) => [t, { ...driver.policies[t] }]),
+    TYPES.map((t) => [t, {
+      ...driver.policies[t],
+      ...(t === focus && intent !== undefined ? { covered: intent } : {}),
+    }]),
   ));
   const [busy, setBusy] = useState(false);
 
   const set = (t, k, v) => setState((s) => ({ ...s, [t]: { ...s[t], [k]: v } }));
 
+  // Turning cover on without a policy number is almost always an oversight.
+  const missingPolicy = TYPES.filter((t) => state[t].covered && !String(state[t].policy_no || '').trim());
+  const dirty = TYPES.some((t) => ['covered', 'policy_no', 'valid_from', 'valid_to'].some(
+    (k) => Boolean(state[t][k] ?? '') !== Boolean(driver.policies[t][k] ?? '')
+      || String(state[t][k] ?? '') !== String(driver.policies[t][k] ?? ''),
+  ));
+
   async function save() {
     setBusy(true);
     try {
       await Promise.all(TYPES.map((t) => api.put(`/insurance/${driver.id}/${t}`, state[t])));
-      toast.success('Policies updated');
+      toast.success(`Insurance updated for ${driver.name}`);
       onDone();
     } catch (err) {
       toast.error(err);
@@ -162,14 +189,36 @@ function PolicyModal({ driver, onClose, onDone }) {
   return (
     <Modal title={`Insurance — ${driver.name}`} wide onClose={onClose}
       footer={<>
+        {!dirty && <span className="muted small" style={{ marginRight: 'auto' }}>Nothing changed yet</span>}
         <button onClick={onClose}>Cancel</button>
-        <button className="primary" onClick={save} disabled={busy}>Save all</button>
+        <button className="primary" onClick={save} disabled={busy || !dirty}>
+          {busy ? <span className="spinner" /> : 'Save'}
+        </button>
       </>}>
+      {focus && (
+        <div className="banner info">
+          <span>ℹ</span>
+          <div>
+            <b>{focus}</b> has been {intent ? 'ticked' : 'unticked'} below. Add the policy number and
+            validity, then <b>Save</b> — nothing is stored until you do.
+          </div>
+        </div>
+      )}
+      {missingPolicy.length > 0 && (
+        <div className="banner warn">
+          <span>!</span>
+          <div>
+            {missingPolicy.join(', ')} {missingPolicy.length === 1 ? 'is' : 'are'} marked covered with
+            no policy number. You can still save, but the register will show cover that cannot be
+            traced to a policy.
+          </div>
+        </div>
+      )}
       <table className="tbl">
         <thead><tr><th>Policy</th><th>Covered</th><th>Policy number</th><th>Valid from</th><th>Valid to</th></tr></thead>
         <tbody>
           {TYPES.map((t) => (
-            <tr key={t}>
+            <tr key={t} style={t === focus ? { background: '#f2f7fd' } : undefined}>
               <td><b>{t}</b><div className="muted small">{LABEL[t]}</div></td>
               <td>
                 <input type="checkbox" style={{ width: 'auto' }} checked={!!state[t].covered}
@@ -205,7 +254,10 @@ function ImportModal({ onClose, onDone }) {
       if (dryRun) {
         setPreview(res);
       } else {
-        toast.success(`${res.updated} driver(s) updated${res.errors.length ? `, ${res.errors.length} row(s) skipped` : ''}`);
+        const n = res.changed ?? res.updated;
+        toast.success(n
+          ? `${n} policy record(s) updated${res.errors.length ? `, ${res.errors.length} row(s) skipped` : ''}`
+          : 'Nothing changed — the sheet matches what is already on record.');
         onDone();
       }
     } catch (err) {
@@ -226,8 +278,15 @@ function ImportModal({ onClose, onDone }) {
       </>}>
       <div className="banner info">
         <span>ℹ</span>
-        <div>Download the list first, edit the Yes/No, policy number and validity columns, then upload
-          it back. Drivers are matched on <b>Registration No</b> (or <b>Client ID</b>).</div>
+        <div>
+          Download the list first, edit the Yes/No, policy number and the <b>Valid From</b> /
+          {' '}<b>Valid To</b> columns, then upload it back. Drivers are matched on
+          {' '}<b>Registration No</b> (or <b>Client ID</b>).
+          <div style={{ marginTop: 4 }}>
+            The sheet is taken as the truth: <b>emptying a cell clears that value</b>. A column you
+            delete from the sheet altogether is left alone.
+          </div>
+        </div>
       </div>
 
       <div className="grid c2">
@@ -246,21 +305,43 @@ function ImportModal({ onClose, onDone }) {
           <div className={`banner ${preview.errors.length ? 'warn' : 'success'}`}>
             <span>{preview.errors.length ? '!' : '✓'}</span>
             <div>
-              {preview.updated} row(s) would be updated
-              {preview.errors.length ? `, ${preview.errors.length} could not be matched.` : '.'}
+              {preview.changed
+                ? <><b>{preview.changed} driver(s)</b> would change, out of {preview.updated} read</>
+                : <>Nothing would change — the sheet matches what is already on record ({preview.updated} row(s) read)</>}
+              {preview.errors.length ? `. ${preview.errors.length} row(s) could not be matched.` : '.'}
               <div className="small muted">Nothing has been saved yet.</div>
             </div>
           </div>
-          {preview.changes.length > 0 && (
-            <div className="tbl-wrap" style={{ maxHeight: 240 }}>
+          {preview.changes.filter((c) => c.changed).length > 0 && (
+            <div className="tbl-wrap" style={{ maxHeight: 260 }}>
               <table className="tbl">
-                <thead><tr><th>Driver</th><th>Policy</th><th>Covered</th><th>Policy no</th></tr></thead>
+                <thead>
+                  <tr>
+                    <th>Driver</th><th>Policy</th><th>Covered</th>
+                    <th>Policy no</th><th>Valid from</th><th>Valid to</th>
+                  </tr>
+                </thead>
                 <tbody>
-                  {preview.changes.map((c, i) => (
+                  {preview.changes.filter((c) => c.changed).map((c, i) => (
                     <tr key={i}>
-                      <td>{c.driver}</td><td>{c.type}</td>
-                      <td>{c.covered ? <span className="chip green">Yes</span> : <span className="chip grey">No</span>}</td>
-                      <td className="mono">{c.policy_no || '—'}</td>
+                      <td>{c.driver}</td>
+                      <td><b>{c.type}</b></td>
+                      <td>
+                        {c.covered
+                          ? <span className="chip green">Yes</span>
+                          : <span className="chip grey">No</span>}
+                        {c.was && c.was.covered !== c.covered && (
+                          <div className="muted small">was {c.was.covered ? 'Yes' : 'No'}</div>
+                        )}
+                      </td>
+                      <td className="mono">
+                        {c.policy_no || <span className="muted">— cleared</span>}
+                        {c.was && c.was.policy_no !== c.policy_no && (
+                          <div className="muted small">was {c.was.policy_no || '—'}</div>
+                        )}
+                      </td>
+                      <td className="mono small">{c.valid_from || <span className="muted">—</span>}</td>
+                      <td className="mono small">{c.valid_to || <span className="muted">—</span>}</td>
                     </tr>
                   ))}
                 </tbody>

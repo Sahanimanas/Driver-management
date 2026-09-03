@@ -10,8 +10,7 @@ CREATE TABLE IF NOT EXISTS users (
   email         TEXT    NOT NULL UNIQUE,
   phone         TEXT,
   password_hash TEXT    NOT NULL,
-  role          TEXT    NOT NULL CHECK (role IN
-                  ('admin','supervisor','senior_manager','director','accounts')),
+  role          TEXT    NOT NULL CHECK (role IN ('supervisor','admin','finance')),
   active        INTEGER NOT NULL DEFAULT 1,
   created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
 );
@@ -58,6 +57,10 @@ CREATE TABLE IF NOT EXISTS drivers (
   bank_ifsc         TEXT,
   bank_name         TEXT,
   uan_no            TEXT,
+  referred_by       TEXT,                    -- name of the person who referred the driver
+  rejection_reason  TEXT,                    -- captured when the client rejects the driver
+  rejected_on       TEXT,
+  scan_id           TEXT REFERENCES attachments(id),  -- the client page this was captured from
   status            TEXT    NOT NULL DEFAULT 'registered'
                     CHECK (status IN ('registered','in_screening','cleared','deployed','left','rejected')),
   remarks           TEXT,
@@ -106,6 +109,7 @@ CREATE TABLE IF NOT EXISTS employments (
   vehicle_number   TEXT,
   location         TEXT,
   monthly_wage     REAL    NOT NULL DEFAULT 0,
+  salary_structure_id INTEGER REFERENCES salary_structures(id),
   status           TEXT    NOT NULL DEFAULT 'active' CHECK (status IN ('active','ended')),
   exit_reason      TEXT,
   created_by       INTEGER REFERENCES users(id),
@@ -146,8 +150,8 @@ CREATE TABLE IF NOT EXISTS insurance (
 );
 
 -- ----------------------------------------------------------------- advances
--- Supervisor raises -> Senior Manager -> Director -> Accounts pays.
--- If a Senior Manager raises it, it goes straight to the Director.
+-- Supervisor raises -> Admin/Director approves -> Finance pays.
+-- Nobody may approve a request they raised themselves.
 CREATE TABLE IF NOT EXISTS advances (
   id                INTEGER PRIMARY KEY AUTOINCREMENT,
   driver_id         INTEGER NOT NULL REFERENCES drivers(id),
@@ -155,16 +159,13 @@ CREATE TABLE IF NOT EXISTS advances (
   amount            REAL    NOT NULL CHECK (amount > 0),
   reason            TEXT    NOT NULL,
   request_date      TEXT    NOT NULL,
-  status            TEXT    NOT NULL DEFAULT 'pending_sm'
-                    CHECK (status IN ('pending_sm','pending_director','approved','rejected','paid')),
+  status            TEXT    NOT NULL DEFAULT 'pending_approval'
+                    CHECK (status IN ('pending_approval','approved','rejected','paid')),
   requested_by      INTEGER NOT NULL REFERENCES users(id),
   requested_at      TEXT    NOT NULL DEFAULT (datetime('now')),
-  sm_by             INTEGER REFERENCES users(id),
-  sm_at             TEXT,
-  sm_remarks        TEXT,
-  director_by       INTEGER REFERENCES users(id),
-  director_at       TEXT,
-  director_remarks  TEXT,
+  approved_by       INTEGER REFERENCES users(id),
+  approved_at       TEXT,
+  approval_remarks  TEXT,
   cutoff            TEXT,                     -- NOON | EVENING (assigned at request time)
   batch_id          INTEGER REFERENCES payment_batches(id),
   paid_at           TEXT,
@@ -195,9 +196,9 @@ CREATE TABLE IF NOT EXISTS payment_batches (
 
 -- ----------------------------------------------------------------- expenses
 -- Petty cash / purchase requests raised by supervisors.
--- < Rs 3000  -> Senior Manager approves, supervisor pays from petty cash and
---               uploads the supporting documents.
--- >= Rs 3000 -> Senior Manager AND Director approve, accounts pays directly.
+-- Admin/Director approves every request. The threshold then decides who pays:
+-- < Rs 3000  -> supervisor pays from petty cash and uploads the supporting docs.
+-- >= Rs 3000 -> Finance pays the vendor directly.
 CREATE TABLE IF NOT EXISTS expenses (
   id               INTEGER PRIMARY KEY AUTOINCREMENT,
   driver_id        INTEGER REFERENCES drivers(id),
@@ -207,16 +208,13 @@ CREATE TABLE IF NOT EXISTS expenses (
   kind             TEXT    NOT NULL CHECK (kind IN ('reimbursement','expense')),
   route            TEXT    NOT NULL CHECK (route IN ('petty_cash','accounts')),
   request_date     TEXT    NOT NULL,
-  status           TEXT    NOT NULL DEFAULT 'pending_sm'
-                   CHECK (status IN ('pending_sm','pending_director','approved','rejected','settled')),
+  status           TEXT    NOT NULL DEFAULT 'pending_approval'
+                   CHECK (status IN ('pending_approval','approved','rejected','settled')),
   requested_by     INTEGER NOT NULL REFERENCES users(id),
   requested_at     TEXT    NOT NULL DEFAULT (datetime('now')),
-  sm_by            INTEGER REFERENCES users(id),
-  sm_at            TEXT,
-  sm_remarks       TEXT,
-  director_by      INTEGER REFERENCES users(id),
-  director_at      TEXT,
-  director_remarks TEXT,
+  approved_by      INTEGER REFERENCES users(id),
+  approved_at      TEXT,
+  approval_remarks TEXT,
   settled_at       TEXT,
   settled_by       INTEGER REFERENCES users(id),
   paid_amount      REAL,
@@ -263,6 +261,11 @@ CREATE TABLE IF NOT EXISTS payroll_lines (
   left_days         INTEGER NOT NULL DEFAULT 0,
   payable_days      REAL    NOT NULL DEFAULT 0,
   rate_per_day      REAL    NOT NULL DEFAULT 0,
+  salary_structure_id INTEGER REFERENCES salary_structures(id),
+  structure_code    TEXT,
+  earnings_json     TEXT,                       -- component-wise earnings for the wage register
+  deductions_json   TEXT,                       -- statutory / structure deductions
+  statutory_deduction REAL  NOT NULL DEFAULT 0,
   gross             REAL    NOT NULL DEFAULT 0,
   advance_deduction REAL    NOT NULL DEFAULT 0,
   other_deduction   REAL    NOT NULL DEFAULT 0,
@@ -329,6 +332,50 @@ CREATE TABLE IF NOT EXISTS audit_log (
   at         TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_log(entity, entity_id);
+
+-- ----------------------------------------------------------- salary master
+-- "Salary master is required to cover all types of salaries which needs to be
+-- given to drivers -- HZL Drivers / Market Drivers." A deployment is linked to
+-- one structure; the wage register is computed from that structure.
+CREATE TABLE IF NOT EXISTS salary_structures (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  code           TEXT    NOT NULL UNIQUE,      -- HZL-STD, MKT-STD, ...
+  name           TEXT    NOT NULL,
+  category       TEXT    NOT NULL CHECK (category IN ('HZL','MARKET')),
+  effective_from TEXT    NOT NULL,
+  monthly_gross  REAL    NOT NULL DEFAULT 0,   -- derived from the components
+  ot_rate_hour   REAL    NOT NULL DEFAULT 0,
+  notes          TEXT,
+  active         INTEGER NOT NULL DEFAULT 1,
+  created_by     INTEGER REFERENCES users(id),
+  created_at     TEXT    NOT NULL DEFAULT (datetime('now')),
+  updated_at     TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+-- One row per line of the salary structure (Basic, HRA, PF, ESIC, ...).
+-- kind = earning adds to gross, deduction subtracts from net.
+CREATE TABLE IF NOT EXISTS salary_components (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  structure_id  INTEGER NOT NULL REFERENCES salary_structures(id) ON DELETE CASCADE,
+  seq           INTEGER NOT NULL DEFAULT 0,
+  name          TEXT    NOT NULL,
+  kind          TEXT    NOT NULL CHECK (kind IN ('earning','deduction')),
+  calc          TEXT    NOT NULL DEFAULT 'fixed' CHECK (calc IN ('fixed','percent_of_basic','percent_of_gross')),
+  value         REAL    NOT NULL DEFAULT 0,
+  prorated      INTEGER NOT NULL DEFAULT 1,    -- scaled by payable days / days in month
+  notes         TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_salcomp_structure ON salary_components(structure_id);
+
+-- ------------------------------------------------------------- app settings
+-- Branding ("change the name ... will share logo") and other client-supplied
+-- configuration that must be editable without a redeploy.
+CREATE TABLE IF NOT EXISTS app_settings (
+  key        TEXT PRIMARY KEY,
+  value      TEXT,
+  updated_by INTEGER REFERENCES users(id),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 
 -- ------------------------------------------------------------------ counters
 CREATE TABLE IF NOT EXISTS counters (

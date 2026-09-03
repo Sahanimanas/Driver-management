@@ -40,7 +40,7 @@ export const titleCase = (s) =>
 export const STATUS_TONE = {
   registered: 'grey', in_screening: 'amber', cleared: 'blue', deployed: 'green',
   left: 'grey', rejected: 'red',
-  pending_sm: 'amber', pending_director: 'violet', approved: 'blue',
+  pending_approval: 'amber', approved: 'blue',
   paid: 'green', rejected_: 'red', settled: 'green',
   draft: 'grey', attendance_finalized: 'blue', reviewed: 'violet', closed: 'grey',
   pending: 'grey', held: 'red', in_bank: 'violet',
@@ -49,8 +49,7 @@ export const STATUS_TONE = {
 };
 
 export const STATUS_LABEL = {
-  pending_sm: 'With Senior Manager',
-  pending_director: 'With Director',
+  pending_approval: 'Awaiting approval',
   approved: 'Approved',
   paid: 'Paid',
   rejected: 'Rejected',

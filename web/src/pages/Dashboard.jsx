@@ -64,29 +64,19 @@ export default function Dashboard() {
           <table className="tbl">
             <tbody>
               <tr>
-                <td>Advances with Senior Manager</td>
-                <td className="num"><b>{approvals.advances_pending_sm}</b></td>
+                <td>Advances with Admin / Director</td>
+                <td className="num"><b>{approvals.advances_pending_approval}</b></td>
                 <td className="right"><Link className="btn sm" to="/advances">Review</Link></td>
               </tr>
               <tr>
-                <td>Advances with Director</td>
-                <td className="num"><b>{approvals.advances_pending_director}</b></td>
-                <td className="right"><Link className="btn sm" to="/advances">Review</Link></td>
-              </tr>
-              <tr>
-                <td>Advances approved, awaiting payment</td>
+                <td>Advances approved, awaiting payment <span className="muted small">by Finance</span></td>
                 <td className="num"><b>{approvals.advances_to_pay}</b> <span className="muted small">
                   {inr0(approvals.advances_to_pay_amount)}</span></td>
                 <td className="right"><Link className="btn sm" to="/advances">Pay</Link></td>
               </tr>
               <tr>
-                <td>Expenses with Senior Manager</td>
-                <td className="num"><b>{approvals.expenses_pending_sm}</b></td>
-                <td className="right"><Link className="btn sm" to="/expenses">Review</Link></td>
-              </tr>
-              <tr>
-                <td>Expenses with Director <span className="muted small">(≥ {inr0(rules.expenseDirectorThreshold)})</span></td>
-                <td className="num"><b>{approvals.expenses_pending_director}</b></td>
+                <td>Expenses with Admin / Director</td>
+                <td className="num"><b>{approvals.expenses_pending_approval}</b></td>
                 <td className="right"><Link className="btn sm" to="/expenses">Review</Link></td>
               </tr>
               <tr>

@@ -20,13 +20,14 @@ export default function DriverProfile() {
   const toast = useToast();
   const [tab, setTab] = useState('overview');
   const [deployOpen, setDeployOpen] = useState(false);
+  const [rejectOpen, setRejectOpen] = useState(false);
   const { data, loading, error, reload } = useAsync(() => api.get(`/drivers/${id}`), [id]);
 
   if (loading) return <Page title="Driver"><Loading what="driver" /></Page>;
   if (error) return <Page title="Driver"><ErrorBanner error={error} onRetry={reload} /></Page>;
 
   const { driver, references, screenings, employments, activeEmployment, insurance, longevity,
-    advances, expenses, attachments } = data;
+    completeness, advances, expenses, attachments } = data;
   const passed = SCREENINGS.every(([t]) => screenings.find((s) => s.type === t)?.status === 'passed');
 
   return (
@@ -34,14 +35,51 @@ export default function DriverProfile() {
       title={driver.name}
       subtitle={<span className="mono">{driver.registration_no}</span>}
       actions={<>
-        {can('supervisor', 'senior_manager') && !activeEmployment && passed && (
+        {can('supervisor') && !activeEmployment && passed && driver.status !== 'rejected' && (
           <button className="primary" onClick={() => setDeployOpen(true)}>
             {employments.length ? '+ Rejoin with new ID' : '+ Deploy'}
           </button>
         )}
+        {can('supervisor') && !activeEmployment && driver.status !== 'rejected' && (
+          <button onClick={() => setRejectOpen(true)}>Client rejected</button>
+        )}
+        {can('supervisor') && driver.status === 'rejected' && (
+          <button onClick={async () => {
+            try {
+              await api.post(`/deployments/reject/${driver.id}/withdraw`, {});
+              toast.success('Rejection withdrawn — the driver is back in the pipeline');
+              reload();
+            } catch (err) { toast.error(err); }
+          }}>Withdraw rejection</button>
+        )}
         <Link className="btn" to="/drivers">Back to list</Link>
       </>}
     >
+      {driver.status === 'rejected' && driver.rejection_reason && (
+        <div className="banner error">
+          <span>✕</span>
+          <div>
+            <b>Rejected by the client{driver.rejected_on ? ` on ${date(driver.rejected_on)}` : ''}.</b>
+            <div style={{ marginTop: 2 }}>{driver.rejection_reason}</div>
+          </div>
+        </div>
+      )}
+
+      {completeness && !completeness.complete && (
+        <div className="banner warn">
+          <span>!</span>
+          <div>
+            <b>Registration incomplete.</b> Still outstanding: {completeness.missing.join(', ')}.
+            {completeness.deferred?.length > 0 && (
+              <div className="small" style={{ marginTop: 4 }}>
+                {completeness.deferred.join(' and ')} may be completed at the deployment step, but
+                {' '}are needed before the first payment.
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       <div className="grid c4" style={{ marginBottom: 16 }}>
         <div className="stat">
           <div className="row">
@@ -95,6 +133,14 @@ export default function DriverProfile() {
           onDone={(msg) => { setDeployOpen(false); toast.success(msg); reload(); }}
         />
       )}
+
+      {rejectOpen && (
+        <RejectModal
+          driver={driver}
+          onClose={() => setRejectOpen(false)}
+          onDone={() => { setRejectOpen(false); toast.success('Rejection recorded'); reload(); }}
+        />
+      )}
     </Page>
   );
 }
@@ -122,7 +168,7 @@ function Overview({ driver, references, employment, onSaved }) {
     <div className="grid c2">
       <Card
         title="Personal & licence"
-        actions={can('supervisor', 'senior_manager', 'accounts') && (
+        actions={can('supervisor', 'finance') && (
           edit
             ? <><button className="primary sm" onClick={save}>Save</button>
               <button className="sm" onClick={() => { setForm(driver); setEdit(false); }}>Cancel</button></>
@@ -139,6 +185,9 @@ function Overview({ driver, references, employment, onSaved }) {
               <Field label="Licence number"><input value={form.dl_no || ''} onChange={set('dl_no')} /></Field>
               <Field label="Licence valid till"><input type="date" value={form.dl_valid_till || ''} onChange={set('dl_valid_till')} /></Field>
               <Field label="UAN"><input value={form.uan_no || ''} onChange={set('uan_no')} /></Field>
+              <Field label="Referred by">
+                <input value={form.referred_by || ''} onChange={set('referred_by')} />
+              </Field>
             </div>
             <Field label="Address"><textarea value={form.address || ''} onChange={set('address')} /></Field>
           </>
@@ -157,6 +206,7 @@ function Overview({ driver, references, employment, onSaved }) {
               ? <span className={`chip ${driver.dl_valid_till < today() ? 'red' : 'green'}`}>{date(driver.dl_valid_till)}</span>
               : '—'}</dd>
             <dt>UAN</dt><dd className="mono">{driver.uan_no || '—'}</dd>
+            <dt>Referred by</dt><dd>{driver.referred_by || '—'}</dd>
             <dt>Registered on</dt><dd>{date(driver.created_at)}</dd>
             {driver.remarks && <><dt>Remarks</dt><dd>{driver.remarks}</dd></>}
           </dl>
@@ -233,7 +283,7 @@ function Screening({ driverId, screenings, onSaved }) {
       <table className="tbl">
         <thead>
           <tr><th>Stage</th><th>Status</th><th>Conducted on</th><th>Remarks</th>
-            {can('supervisor', 'senior_manager') && <th className="right">Record</th>}</tr>
+            {can('supervisor') && <th className="right">Record</th>}</tr>
         </thead>
         <tbody>
           {SCREENINGS.map(([type, label]) => {
@@ -244,7 +294,7 @@ function Screening({ driverId, screenings, onSaved }) {
                 <td><StatusChip value={s.status === 'pending' ? 'pending' : s.status === 'passed' ? 'passed' : 'failed'} /></td>
                 <td>{date(s.conducted_on)}</td>
                 <td className="muted">{s.remarks || '—'}</td>
-                {can('supervisor', 'senior_manager') && (
+                {can('supervisor') && (
                   <td className="right nowrap">
                     <button className="sm good" disabled={busy === type} onClick={() => record(type, 'passed')}>Pass</button>{' '}
                     <button className="sm danger" disabled={busy === type} onClick={() => record(type, 'failed')}>Fail</button>
@@ -295,7 +345,7 @@ function IdHistory({ employments, longevity, onChanged }) {
                 <td><StatusChip value={e.status} /></td>
                 <td className="muted small">{e.exit_reason || '—'}</td>
                 <td className="right">
-                  {e.status === 'active' && can('supervisor', 'senior_manager') && (
+                  {e.status === 'active' && can('supervisor') && (
                     <button className="sm" onClick={() => setEnding(e)}>End deployment</button>
                   )}
                 </td>
@@ -361,18 +411,49 @@ function EndModal({ employment, onClose, onDone }) {
   );
 }
 
+/**
+ * Deployment: the client has issued a six digit ID and a date of joining, and
+ * the deployment is linked to a salary structure off the master.
+ *
+ * This is also the last chance to capture the bank details and the UAN — the
+ * scope allows those two to be completed here rather than at registration.
+ */
 function DeployModal({ driver, rejoin, onClose, onDone }) {
   const toast = useToast();
   const [form, setForm] = useState({
-    client_id: '', date_of_joining: today(), vehicle_number: '', location: '', monthly_wage: 20000,
+    client_id: '',
+    date_of_joining: today(),
+    vehicle_number: '',
+    location: '',
+    salary_structure_id: '',
+    monthly_wage: '',
+    bank_account_no: driver.bank_account_no || '',
+    bank_ifsc: driver.bank_ifsc || '',
+    bank_name: driver.bank_name || '',
+    uan_no: driver.uan_no || '',
   });
   const [busy, setBusy] = useState(false);
+  const [allowMissingBank, setAllowMissingBank] = useState(false);
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+
+  const structures = useAsync(() => api.get('/salary-master?active=true'), []);
+  const rows = structures.data?.rows || [];
+  const chosen = rows.find((r) => String(r.id) === String(form.salary_structure_id));
+
+  const bankIncomplete = !form.bank_account_no.trim() || !form.bank_ifsc.trim();
+  const ready = /^\d{6}$/.test(form.client_id)
+    && form.date_of_joining
+    && (form.salary_structure_id || Number(form.monthly_wage) > 0)
+    && (!bankIncomplete || allowMissingBank);
 
   async function submit() {
     setBusy(true);
     try {
-      const res = await api.post('/deployments', { driver_id: driver.id, ...form });
+      const payload = { driver_id: driver.id, ...form };
+      if (!payload.salary_structure_id) delete payload.salary_structure_id;
+      if (!payload.monthly_wage) delete payload.monthly_wage;
+      if (allowMissingBank) payload.allow_missing_bank = true;
+      const res = await api.post('/deployments', payload);
       onDone(res.message);
     } catch (err) {
       toast.error(err);
@@ -383,11 +464,12 @@ function DeployModal({ driver, rejoin, onClose, onDone }) {
 
   return (
     <Modal
+      wide
       title={rejoin ? `Rejoin — new client ID for ${driver.name}` : `Deploy ${driver.name}`}
       onClose={onClose}
       footer={<>
         <button onClick={onClose}>Cancel</button>
-        <button className="primary" onClick={submit} disabled={busy || !/^\d{6}$/.test(form.client_id)}>
+        <button className="primary" onClick={submit} disabled={busy || !ready}>
           {busy ? <span className="spinner" /> : 'Deploy'}
         </button>
       </>}
@@ -399,6 +481,7 @@ function DeployModal({ driver, rejoin, onClose, onDone }) {
             service continues to count towards longevity.</div>
         </div>
       )}
+
       <div className="grid c2">
         <Field label="Client ID" hint="six digits, issued by the client">
           <input value={form.client_id} onChange={set('client_id')} placeholder="400123" maxLength={6} />
@@ -413,8 +496,125 @@ function DeployModal({ driver, rejoin, onClose, onDone }) {
           <input value={form.location} onChange={set('location')} placeholder="Site where the driver is placed" />
         </Field>
       </div>
-      <Field label="Monthly wage" hint="used for the wage register">
-        <input type="number" value={form.monthly_wage} onChange={set('monthly_wage')} />
+
+      <h4 style={{ margin: '16px 0 8px', fontSize: 13 }}>Salary</h4>
+      <Field label="Salary structure" hint="from the salary master">
+        <select value={form.salary_structure_id} onChange={set('salary_structure_id')}>
+          <option value="">— choose a structure —</option>
+          {rows.map((r) => (
+            <option key={r.id} value={r.id}>
+              {r.name} ({r.code}) — {inr0(r.monthly_gross)}/month
+            </option>
+          ))}
+        </select>
+      </Field>
+      {chosen ? (
+        <div className="banner">
+          <span>₹</span>
+          <div>
+            {chosen.category === 'HZL' ? 'HZL Drivers' : 'Market Drivers'} ·
+            {' '}gross <b>{inr0(chosen.monthly_gross)}</b> a month. Leave the wage below blank to use it.
+          </div>
+        </div>
+      ) : (
+        <div className="banner warn">
+          <span>!</span>
+          <div>
+            Pick a structure, or enter a flat monthly wage. Without one of the two the wage register
+            has nothing to compute from.
+          </div>
+        </div>
+      )}
+      <Field label="Monthly wage" hint="overrides the structure for this deployment only">
+        <input type="number" value={form.monthly_wage} onChange={set('monthly_wage')}
+          placeholder={chosen ? String(chosen.monthly_gross) : 'e.g. 20000'} />
+      </Field>
+
+      <h4 style={{ margin: '16px 0 8px', fontSize: 13 }}>
+        Bank details and UAN
+        <span className="muted small" style={{ fontWeight: 400 }}> — may be completed at this step</span>
+      </h4>
+      <div className="grid c2">
+        <Field label="Account number">
+          <input value={form.bank_account_no} onChange={set('bank_account_no')} />
+        </Field>
+        <Field label="IFSC code">
+          <input value={form.bank_ifsc} onChange={set('bank_ifsc')} placeholder="SBIN0004521" />
+        </Field>
+        <Field label="Bank name">
+          <input value={form.bank_name} onChange={set('bank_name')} />
+        </Field>
+        <Field label="UAN number">
+          <input value={form.uan_no} onChange={set('uan_no')} />
+        </Field>
+      </div>
+      {bankIncomplete && (
+        <div className="banner warn">
+          <span>!</span>
+          <div>
+            The account number and IFSC are needed before this driver can be paid an advance or a
+            salary through the bank.
+            <label className="check" style={{ marginTop: 6 }}>
+              <input type="checkbox" checked={allowMissingBank}
+                onChange={(e) => setAllowMissingBank(e.target.checked)} />
+              Deploy now and add the bank details before the first payment run
+            </label>
+          </div>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+/**
+ * "Or its rejected... and capture reason of rejection."
+ *
+ * No employment is created — the driver stays on record with the client's
+ * reason against them, so the decision is auditable and they can be put
+ * forward again later.
+ */
+function RejectModal({ driver, onClose, onDone }) {
+  const toast = useToast();
+  const [reason, setReason] = useState('');
+  const [on, setOn] = useState(today());
+  const [busy, setBusy] = useState(false);
+
+  async function submit() {
+    setBusy(true);
+    try {
+      await api.post('/deployments/reject', { driver_id: driver.id, reason, rejected_on: on });
+      onDone();
+    } catch (err) {
+      toast.error(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal
+      title={`Client rejected ${driver.name}`}
+      onClose={onClose}
+      footer={<>
+        <button onClick={onClose}>Cancel</button>
+        <button className="danger" onClick={submit} disabled={busy || reason.trim().length < 3}>
+          {busy ? <span className="spinner" /> : 'Record the rejection'}
+        </button>
+      </>}
+    >
+      <div className="banner info">
+        <span>i</span>
+        <div>
+          No client ID is issued and no billing starts. The driver stays on record with the reason
+          against them, and can be put forward again if the client reconsiders.
+        </div>
+      </div>
+      <Field label="Date of rejection">
+        <input type="date" value={on} onChange={(e) => setOn(e.target.value)} />
+      </Field>
+      <Field label="Reason given by the client">
+        <textarea value={reason} onChange={(e) => setReason(e.target.value)} style={{ minHeight: 80 }}
+          placeholder="e.g. Failed the client's own driving assessment on the reversing test" />
       </Field>
     </Modal>
   );
@@ -470,7 +670,7 @@ function Documents({ driver, attachments, onSaved }) {
                 <span>!</span><div>Not uploaded yet.</div>
               </div>
             )}
-            {can('supervisor', 'senior_manager', 'accounts') && (
+            {can('supervisor', 'finance') && (
               <label className="field" style={{ marginTop: 10, marginBottom: 0 }}>
                 <span>{attId ? 'Replace' : 'Upload'} {busy === kind && <span className="spinner" />}</span>
                 <input type="file" accept="image/*,application/pdf"
@@ -535,7 +735,7 @@ function InsuranceTab({ driverId, insurance, onSaved }) {
               <tr key={type}>
                 <td><b>{type}</b> <span className="muted small">{label}</span></td>
                 <td>
-                  {can('supervisor', 'senior_manager', 'accounts') ? (
+                  {can('supervisor', 'finance') ? (
                     <label className="check">
                       <input type="checkbox" checked={!!row.covered} onChange={() => toggle(type, row)} />
                       {row.covered ? 'Covered' : 'Not covered'}
