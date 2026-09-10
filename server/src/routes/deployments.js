@@ -9,6 +9,20 @@ router.use(authenticate);
 
 const SCREENING_TYPES = ['trial', 'safety', 'medical'];
 
+/**
+ * The loyalty service allowance a driver is entitled to each month. It is set
+ * per driver -- in the client's register most carry none and a few 1,500 or
+ * 3,000 -- and the pay engine prorates it by attendance like any allowance.
+ */
+function lsaMonthly(v) {
+  if (v === undefined || v === null || v === '') return 0;
+  const n = Number(v);
+  if (!Number.isFinite(n) || n < 0 || n > 100000) {
+    throw bad('LSA must be an amount between 0 and 1,00,000 a month');
+  }
+  return money(n);
+}
+
 router.get(
   '/',
   h(async (req, res) => {
@@ -107,6 +121,7 @@ router.post(
     if (req.body.bank_account_no) bankPatch.bank_account_no = digits(req.body.bank_account_no);
     if (req.body.bank_ifsc) bankPatch.bank_ifsc = String(req.body.bank_ifsc).toUpperCase().trim();
     if (req.body.bank_name) bankPatch.bank_name = String(req.body.bank_name).trim();
+    if (req.body.bank_branch) bankPatch.bank_branch = String(req.body.bank_branch).trim();
     if (req.body.bank_account_name) bankPatch.bank_account_name = String(req.body.bank_account_name).trim();
     if (req.body.uan_no) bankPatch.uan_no = digits(req.body.uan_no);
 
@@ -127,8 +142,8 @@ router.post(
       const empId = q.insert(
         `INSERT INTO employments
            (driver_id, client_id, date_of_joining, vehicle_number, location, monthly_wage,
-            salary_structure_id, created_by)
-         VALUES (?,?,?,?,?,?,?,?)`,
+            salary_structure_id, lsa_monthly, created_by)
+         VALUES (?,?,?,?,?,?,?,?,?)`,
         driverId,
         clientId,
         doj,
@@ -137,6 +152,7 @@ router.post(
         // The structure sets the wage unless one is entered explicitly.
         money(req.body.monthly_wage || structure?.monthly_gross || 0),
         structure?.id || null,
+        lsaMonthly(req.body.lsa_monthly),
         req.user.id,
       );
       if (Object.keys(bankPatch).length) {
@@ -178,7 +194,8 @@ router.patch(
     if (!emp) throw notFound('Deployment not found');
 
     const patch = {};
-    ['vehicle_number', 'location', 'monthly_wage', 'date_of_joining', 'salary_structure_id'].forEach((k) => {
+    ['vehicle_number', 'location', 'monthly_wage', 'date_of_joining', 'salary_structure_id',
+      'lsa_monthly'].forEach((k) => {
       if (req.body[k] !== undefined) patch[k] = req.body[k];
     });
     if (patch.salary_structure_id) {
@@ -192,6 +209,7 @@ router.patch(
     if (patch.date_of_joining && !isDate(patch.date_of_joining)) throw bad('Date of joining must be YYYY-MM-DD');
     if (patch.vehicle_number) patch.vehicle_number = String(patch.vehicle_number).toUpperCase().replace(/\s/g, '');
     if (patch.monthly_wage !== undefined) patch.monthly_wage = Number(patch.monthly_wage) || 0;
+    if (patch.lsa_monthly !== undefined) patch.lsa_monthly = lsaMonthly(patch.lsa_monthly);
     if (!Object.keys(patch).length) throw bad('Nothing to update');
 
     q.run(

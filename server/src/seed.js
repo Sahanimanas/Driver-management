@@ -5,6 +5,8 @@
 import { q, tx, nextCounter } from './db.js';
 import { hash } from './auth.js';
 import { today, addDays, periodDays } from './util.js';
+import { CLIENT_STRUCTURES as STRUCTURES } from './payroll/structures.js';
+import { installStructure } from './payroll/install.js';
 
 // Three roles: supervisor, admin (Admin / Director) and finance.
 // Two Admin / Director accounts, so that the rule against approving your own
@@ -60,71 +62,31 @@ function seedUsers() {
 }
 
 /**
- * The salary master: one structure per category named in the scope. The real
- * figures come from the client -- these are placeholders with a realistic
- * shape so the wage register and the payment sheet have something to compute.
+ * The salary master, loaded with the two structures from the client's own pay
+ * registers (payroll/structures.js) — the same definitions the pay-register
+ * test replays the client's July 2026 register through.
  */
-const STRUCTURES = [
-  {
-    code: 'HZL-STD', name: 'HZL Driver — Standard', category: 'HZL',
-    effective_from: '2025-04-01', ot_rate_hour: 95,
-    notes: 'Placeholder figures — replace with the structure supplied by the client.',
-    components: [
-      ['Basic', 'earning', 'fixed', 13200, 1],
-      ['HRA', 'earning', 'percent_of_basic', 20, 1],
-      ['Conveyance Allowance', 'earning', 'fixed', 1600, 1],
-      ['Site Allowance', 'earning', 'fixed', 2400, 1],
-      ['Washing Allowance', 'earning', 'fixed', 600, 0],
-      ['Provident Fund', 'deduction', 'percent_of_basic', 12, 1],
-      ['ESIC', 'deduction', 'percent_of_gross', 0.75, 1],
-      ['Professional Tax', 'deduction', 'fixed', 200, 0],
-    ],
-  },
-  {
-    code: 'MKT-STD', name: 'Market Driver — Standard', category: 'MARKET',
-    effective_from: '2025-04-01', ot_rate_hour: 80,
-    notes: 'Placeholder figures — replace with the structure supplied by the client.',
-    components: [
-      ['Basic', 'earning', 'fixed', 11000, 1],
-      ['HRA', 'earning', 'percent_of_basic', 20, 1],
-      ['Conveyance Allowance', 'earning', 'fixed', 1200, 1],
-      ['Provident Fund', 'deduction', 'percent_of_basic', 12, 1],
-      ['ESIC', 'deduction', 'percent_of_gross', 0.75, 1],
-      ['Professional Tax', 'deduction', 'fixed', 200, 0],
-    ],
-  },
-];
-
 function seedSalaryMaster(users) {
   const ids = {};
   STRUCTURES.forEach((st) => {
-    const id = q.insert(
-      `INSERT INTO salary_structures(code, name, category, effective_from, ot_rate_hour, notes, created_by)
-       VALUES (?,?,?,?,?,?,?)`,
-      st.code, st.name, st.category, st.effective_from, st.ot_rate_hour, st.notes, users.admin,
-    );
-    st.components.forEach(([name, kind, calc, value, prorated], i) => {
-      q.run(
-        `INSERT INTO salary_components(structure_id, seq, name, kind, calc, value, prorated)
-         VALUES (?,?,?,?,?,?,?)`,
-        id, i, name, kind, calc, value, prorated,
-      );
-    });
-    // Headline monthly gross, the same way salary-master.js computes it.
-    const comps = q.all('SELECT * FROM salary_components WHERE structure_id = ?', id);
-    const basic = Number(comps.find((c) => /^basic/i.test(c.name))?.value || 0);
-    let gross = 0;
-    comps.filter((c) => c.kind === 'earning').forEach((c) => {
-      if (c.calc === 'fixed') gross += Number(c.value);
-      else if (c.calc === 'percent_of_basic') gross += (basic * Number(c.value)) / 100;
-    });
-    comps.filter((c) => c.kind === 'earning' && c.calc === 'percent_of_gross').forEach((c) => {
-      gross += (gross * Number(c.value)) / 100;
-    });
-    q.run('UPDATE salary_structures SET monthly_gross = ? WHERE id = ?', Math.round(gross * 100) / 100, id);
-    ids[st.code] = { id, gross: Math.round(gross * 100) / 100, category: st.category };
+    const { id, gross } = installStructure(q, st, users.admin);
+    ids[st.code] = { id, gross, category: st.category };
   });
   return ids;
+}
+
+/**
+ * LSA is set per driver, not per structure — in the client's July register 5
+ * Surat drivers carry 1,500 and 3 carry 3,000, the rest nothing. Give a few
+ * seeded Surat deployments each figure so the register exercises it.
+ */
+function seedLsa(structures) {
+  q.run(
+    `UPDATE employments
+        SET lsa_monthly = CASE WHEN id % 7 = 0 THEN 3000 WHEN id % 4 = 0 THEN 1500 ELSE 0 END
+      WHERE salary_structure_id = ?`,
+    structures['SURAT-LNG'].id,
+  );
 }
 
 function seedDrivers(users) {
@@ -210,7 +172,7 @@ function seedDeployments(drivers, users, structures) {
   let clientId = 400100;
   const deployed = [];
   // Roughly two thirds are on the HZL structure, the rest on Market.
-  const structureList = [structures['HZL-STD'], structures['HZL-STD'], structures['MKT-STD']];
+  const structureList = [structures['HZL-LNG'], structures['HZL-LNG'], structures['SURAT-LNG']];
 
   drivers.filter((d) => d.outcome === 'passed').forEach((d, idx) => {
     const doj = addDays(d.registeredOn, between(5, 20));
@@ -433,12 +395,13 @@ tx(() => {
   const structures = seedSalaryMaster(users);
   const drivers = seedDrivers(users);
   const deployed = seedDeployments(drivers, users, structures);
+  seedLsa(structures);
   seedAttendance(deployed, users);
   seedFinance(deployed, users);
   seedCampaign(users);
 
   console.log(`  users:       ${USERS.length}`);
-  console.log(`  salary master: ${STRUCTURES.length} structures (HZL, Market)`);
+  console.log(`  salary master: ${STRUCTURES.length} structures (HZL, Surat) from the client registers`);
   console.log(`  drivers:     ${drivers.length}`);
   console.log(`  deployments: ${deployed.length}`);
   console.log(`  advances:    ${q.scalar('SELECT count(*) FROM advances')}`);

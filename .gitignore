@@ -4,6 +4,9 @@ server/data/
 server/.env
 *.log
 .DS_Store
+# Client registers dropped in for reference: real names, bank accounts, UANs
+/surat.csv
+/hzl_pay_register.csv
 # OCR language packs are fetched at runtime, not committed
 *.traineddata
 *.traineddata.gz

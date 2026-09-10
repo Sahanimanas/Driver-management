@@ -21,7 +21,34 @@ const CALC_LABEL = {
   percent_of_gross: '% of Gross',
 };
 
-const BLANK_COMPONENT = { name: '', kind: 'earning', calc: 'fixed', value: '', prorated: true };
+const BLANK_COMPONENT = {
+  name: '', kind: 'earning', calc: 'fixed', value: '', prorated: true,
+  rounding: 'none', basis: 'earned', cap: '', condition: '',
+  employer: false, per_driver: false, is_basic: false,
+};
+
+const FORMAT_LABEL = {
+  standard: 'Standard',
+  hzl: 'HZL register',
+  surat: 'Surat register',
+};
+
+/** The rules on a component, in words, for the structure card. */
+function ruleText(c) {
+  const out = [];
+  if (c.is_basic) out.push('basic');
+  if (c.rounding === 'rupee') out.push('rounded to ₹');
+  if (c.basis === 'fixed' && c.calc === 'percent_of_basic') out.push('on fixed basic');
+  if (Number(c.cap) > 0) out.push(`capped at ${inr(c.cap)}`);
+  if (c.condition) {
+    const [k, n] = c.condition.split(':');
+    out.push({ days_gte: `only at ${n}+ days`, gross_gt: `only if gross > ${n}`, gross_lte: `only if gross ≤ ${n}` }[k]
+      || c.condition);
+  }
+  if (c.per_driver) out.push('set per driver');
+  if (c.employer) out.push('employer cost');
+  return out.join(' · ');
+}
 
 export default function SalaryMaster() {
   const { user } = useAuth();
@@ -136,7 +163,22 @@ function StructureCard({ row, canEdit, onEdit, onDelete, onToggle }) {
   );
 
   const earnings = row.components.filter((c) => c.kind === 'earning');
-  const deductions = row.components.filter((c) => c.kind === 'deduction');
+  const deductions = row.components.filter((c) => c.kind === 'deduction' && !c.employer);
+  const employer = row.components.filter((c) => c.kind === 'deduction' && c.employer);
+  const line = (c) => (
+    <tr key={c.id}>
+      <td>
+        {c.name}
+        {ruleText(c) && <div className="small muted">{ruleText(c)}</div>}
+      </td>
+      <td className="small muted">{CALC_LABEL[c.calc]}</td>
+      <td className="right mono">{c.calc === 'fixed' ? inr(c.value) : `${c.value}%`}</td>
+      <td className="small muted">{c.prorated ? 'Yes' : 'No'}</td>
+    </tr>
+  );
+  const heading = (text) => (
+    <tr><td colSpan={4} className="small muted" style={{ paddingTop: 10 }}><b>{text}</b></td></tr>
+  );
 
   return (
     <Card
@@ -157,31 +199,24 @@ function StructureCard({ row, canEdit, onEdit, onDelete, onToggle }) {
         <span className="chip">{row.deployments} deployment{row.deployments === 1 ? '' : 's'}</span>
         <span className="small muted">Effective {row.effective_from}</span>
       </div>
+      {(row.service_charge > 0 || row.register_format !== 'standard') && (
+        <div className="small muted" style={{ marginBottom: 10 }}>
+          Billing: service charge <b>{inr(row.service_charge)}</b>/person/month on days present
+          {' '}· GST {row.gst_rate}%{row.tds_rate > 0 && <> · TDS {row.tds_rate}%</>}
+          {' '}· {FORMAT_LABEL[row.register_format] || row.register_format}
+        </div>
+      )}
 
       <table className="tbl">
         <thead>
           <tr><th>Component</th><th>Basis</th><th className="right">Value</th><th>Prorated</th></tr>
         </thead>
         <tbody>
-          {earnings.map((c) => (
-            <tr key={c.id}>
-              <td>{c.name}</td>
-              <td className="small muted">{CALC_LABEL[c.calc]}</td>
-              <td className="right mono">{c.calc === 'fixed' ? inr(c.value) : `${c.value}%`}</td>
-              <td className="small muted">{c.prorated ? 'Yes' : 'No'}</td>
-            </tr>
-          ))}
-          {deductions.length > 0 && (
-            <tr><td colSpan={4} className="small muted" style={{ paddingTop: 10 }}><b>Deductions</b></td></tr>
-          )}
-          {deductions.map((c) => (
-            <tr key={c.id}>
-              <td>{c.name}</td>
-              <td className="small muted">{CALC_LABEL[c.calc]}</td>
-              <td className="right mono">{c.calc === 'fixed' ? inr(c.value) : `${c.value}%`}</td>
-              <td className="small muted">{c.prorated ? 'Yes' : 'No'}</td>
-            </tr>
-          ))}
+          {earnings.map(line)}
+          {deductions.length > 0 && heading('Deductions')}
+          {deductions.map(line)}
+          {employer.length > 0 && heading('Employer contributions (company cost, not deducted)')}
+          {employer.map(line)}
         </tbody>
       </table>
 
@@ -221,25 +256,45 @@ function StructureModal({ structure, onClose, onDone }) {
     category: structure?.category || 'HZL',
     effective_from: structure?.effective_from || new Date().toISOString().slice(0, 10),
     ot_rate_hour: structure?.ot_rate_hour ?? 0,
+    service_charge: structure?.service_charge ?? 0,
+    gst_rate: structure?.gst_rate ?? 18,
+    tds_rate: structure?.tds_rate ?? 0,
+    register_format: structure?.register_format || 'standard',
+    role_label: structure?.role_label || '',
     notes: structure?.notes || '',
   });
   const [components, setComponents] = useState(
     structure?.components?.length
-      ? structure.components.map((c) => ({ ...c, prorated: Boolean(c.prorated) }))
-      : [{ ...BLANK_COMPONENT, name: 'Basic' }],
+      ? structure.components.map((c) => ({
+        ...BLANK_COMPONENT,
+        ...c,
+        prorated: Boolean(c.prorated),
+        employer: Boolean(c.employer),
+        per_driver: Boolean(c.per_driver),
+        is_basic: Boolean(c.is_basic),
+        cap: c.cap || '',
+        condition: c.condition || '',
+      }))
+      : [{ ...BLANK_COMPONENT, name: 'Basic', is_basic: true }],
   );
   const [busy, setBusy] = useState(false);
 
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
-  const setC = (i, k, v) => setComponents((cs) => cs.map((c, j) => (j === i ? { ...c, [k]: v } : c)));
+  const setC = (i, k, v) => setComponents((cs) => cs.map((c, j) => {
+    if (j === i) return { ...c, [k]: v };
+    // Only one component can be the basic.
+    return k === 'is_basic' && v ? { ...c, is_basic: false } : c;
+  }));
   const addC = () => setComponents((cs) => [...cs, { ...BLANK_COMPONENT }]);
   const delC = (i) => setComponents((cs) => cs.filter((_, j) => j !== i));
 
-  // The same arithmetic the server does, so the total moves as you type.
+  // Roughly the server's arithmetic for a full month, so the total moves as you
+  // type. Amounts set per driver (LSA) are left out; the card preview is exact.
   const monthlyGross = useMemo(() => {
-    const basic = Number(components.find((c) => /^basic/i.test(c.name))?.value || 0);
+    const basicC = components.find((c) => c.is_basic) || components.find((c) => /^basic/i.test(c.name));
+    const basic = Number(basicC?.value || 0);
     let gross = 0;
-    components.filter((c) => c.kind === 'earning').forEach((c) => {
+    components.filter((c) => c.kind === 'earning' && !c.per_driver).forEach((c) => {
       if (c.calc === 'fixed') gross += Number(c.value || 0);
       else if (c.calc === 'percent_of_basic') gross += (basic * Number(c.value || 0)) / 100;
     });
@@ -255,9 +310,14 @@ function StructureModal({ structure, onClose, onDone }) {
       const payload = {
         ...form,
         ot_rate_hour: Number(form.ot_rate_hour) || 0,
+        service_charge: Number(form.service_charge) || 0,
+        gst_rate: Number(form.gst_rate) || 0,
+        tds_rate: Number(form.tds_rate) || 0,
         components: components
           .filter((c) => c.name.trim())
-          .map((c, i) => ({ ...c, seq: i, value: Number(c.value) || 0 })),
+          .map((c, i) => ({
+            ...c, seq: i, value: Number(c.value) || 0, cap: Number(c.cap) || 0, condition: c.condition.trim(),
+          })),
       };
       if (structure) await api.patch(`/salary-master/${structure.id}`, payload);
       else await api.post('/salary-master', payload);
@@ -311,17 +371,42 @@ function StructureModal({ structure, onClose, onDone }) {
         <Field label="Overtime rate / hour">
           <input type="number" min={0} value={form.ot_rate_hour} onChange={set('ot_rate_hour')} />
         </Field>
+        <Field label="Designation on the register" hint="e.g. LNG Tip Trailer Driver">
+          <input value={form.role_label} onChange={set('role_label')} />
+        </Field>
+      </div>
+
+      <h4 style={{ margin: '18px 0 8px' }}>Billing to the client</h4>
+      <div className="grid c4">
+        <Field label="Service charge" hint="per person / month, on days present">
+          <input type="number" min={0} value={form.service_charge} onChange={set('service_charge')} />
+        </Field>
+        <Field label="GST %">
+          <input type="number" min={0} max={100} step="0.01" value={form.gst_rate} onChange={set('gst_rate')} />
+        </Field>
+        <Field label="TDS %" hint="deducted by the client">
+          <input type="number" min={0} max={100} step="0.01" value={form.tds_rate} onChange={set('tds_rate')} />
+        </Field>
+        <Field label="Pay register layout">
+          <select value={form.register_format} onChange={set('register_format')}>
+            {Object.entries(FORMAT_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+          </select>
+        </Field>
       </div>
 
       <h4 style={{ margin: '18px 0 8px' }}>Components</h4>
       <table className="tbl">
         <thead>
           <tr>
-            <th style={{ width: '30%' }}>Name</th>
+            <th style={{ width: '20%' }}>Name</th>
             <th>Type</th>
             <th>Basis</th>
-            <th style={{ width: 110 }}>Value</th>
+            <th style={{ width: 100 }}>Value</th>
             <th>Prorated</th>
+            <th>Round</th>
+            <th style={{ width: 90 }}>Cap</th>
+            <th style={{ width: 120 }}>Only if</th>
+            <th>Flags</th>
             <th />
           </tr>
         </thead>
@@ -341,6 +426,14 @@ function StructureModal({ structure, onClose, onDone }) {
                   <option value="percent_of_basic">% of Basic</option>
                   <option value="percent_of_gross">% of Gross</option>
                 </select>
+                {c.calc === 'percent_of_basic' && (
+                  <select value={c.basis} onChange={(e) => setC(i, 'basis', e.target.value)}
+                    title="Whether the % is taken of the basic actually earned this month or the full basic"
+                    style={{ marginTop: 4 }}>
+                    <option value="earned">of earned basic</option>
+                    <option value="fixed">of full basic</option>
+                  </select>
+                )}
               </td>
               <td>
                 <input type="number" min={0} step="0.01" value={c.value}
@@ -349,6 +442,40 @@ function StructureModal({ structure, onClose, onDone }) {
               <td style={{ textAlign: 'center' }}>
                 <input type="checkbox" checked={c.prorated}
                   onChange={(e) => setC(i, 'prorated', e.target.checked)} />
+              </td>
+              <td>
+                <select value={c.rounding} onChange={(e) => setC(i, 'rounding', e.target.value)}
+                  title="Rupee = Excel ROUND(x,0)">
+                  <option value="none">Paise</option>
+                  <option value="rupee">Rupee</option>
+                </select>
+              </td>
+              <td>
+                <input type="number" min={0} value={c.cap} placeholder="—"
+                  title="Wage ceiling the % is applied to (e.g. PF on 15,000)"
+                  onChange={(e) => setC(i, 'cap', e.target.value)} />
+              </td>
+              <td>
+                <input value={c.condition} placeholder="e.g. days_gte:30"
+                  title="days_gte:N · gross_gt:N · gross_lte:N"
+                  onChange={(e) => setC(i, 'condition', e.target.value)} />
+              </td>
+              <td className="small" style={{ whiteSpace: 'nowrap' }}>
+                <label title="The basic that % of Basic lines are taken of">
+                  <input type="checkbox" checked={c.is_basic}
+                    onChange={(e) => setC(i, 'is_basic', e.target.checked)} /> Basic
+                </label><br />
+                {c.kind === 'earning' ? (
+                  <label title="The amount comes from each deployment (LSA), not this structure">
+                    <input type="checkbox" checked={c.per_driver}
+                      onChange={(e) => setC(i, 'per_driver', e.target.checked)} /> Per driver
+                  </label>
+                ) : (
+                  <label title="Paid by the company on top of salary, not deducted from the driver">
+                    <input type="checkbox" checked={c.employer}
+                      onChange={(e) => setC(i, 'employer', e.target.checked)} /> Employer
+                  </label>
+                )}
               </td>
               <td className="right">
                 <button className="sm" onClick={() => delC(i)} disabled={components.length === 1}>✕</button>
@@ -363,7 +490,9 @@ function StructureModal({ structure, onClose, onDone }) {
         <span>ℹ</span>
         <div>
           A prorated component is scaled by payable days ÷ days in the month; the rest are paid
-          whole. Payable days are P + T + TA — leave and left days are not paid.
+          whole. Payable days are P + T + TA — leave and left days are not paid. <b>Only if</b> takes
+          {' '}<span className="mono">days_gte:30</span> (attendance bonus), <span className="mono">gross_gt:12000</span>
+          {' '}(PT) or <span className="mono">gross_lte:21000</span> (ESIC).
         </div>
       </div>
 

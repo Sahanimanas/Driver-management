@@ -78,6 +78,11 @@ export default function Salary() {
               onClick={() => api.download(`/salary/periods/${period}/wage-register`, `wage-register-${period}.xlsx`)}>
               3 · ⭳ Wage register (for invoicing)
             </button>
+            <button disabled={!p}
+              title="HZL and Surat sheets in the client's own layout — earned pay from attendance, PF, PT, CTC, service charge and GST"
+              onClick={() => api.download(`/salary/periods/${period}/pay-register`, `pay-register-${period}.xlsx`)}>
+              3b · ⭳ Pay register (client format)
+            </button>
             <button disabled={!p} className="primary"
               onClick={() => api.download(`/salary/periods/${period}/enet-sheet`, `hdfc-enet-${period}.xlsx`)}>
               4 · ⭳ HDFC e-Net payment sheet

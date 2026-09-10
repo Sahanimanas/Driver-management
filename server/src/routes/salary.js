@@ -6,6 +6,8 @@ import { config } from '../config.js';
 import { upload, saveBuffer } from '../files.js';
 import { buildWorkbook, readWorkbook, XLSX_MIME } from '../excel.js';
 import { loadStructure, computeSalary, CATEGORY_LABEL } from './salary-master.js';
+import { flatStructure } from '../payroll/engine.js';
+import { buildPayRegister, registerLine } from '../payroll/register.js';
 import {
   h, bad, notFound, isPeriod, periodDays, daysInPeriod, today, money, num, bool, digits,
 } from '../util.js';
@@ -105,13 +107,20 @@ router.post(
         // component off the master; one without falls back to the flat
         // monthly wage recorded against the deployment.
         const structure = structureFor(emp.salary_structure_id);
-        const computed = structure ? computeSalary(structure, t.payableDays, monthDays) : null;
+        const computed = computeSalary(
+          structure || flatStructure(emp.monthly_wage), t.payableDays, monthDays,
+          { lsaMonthly: Number(emp.lsa_monthly) || 0 },
+        );
 
-        const rate = computed ? computed.ratePerDay : money((emp.monthly_wage || 0) / monthDays);
-        const g = computed ? computed.gross : money(t.payableDays * rate);
-        const statutory = computed ? computed.statutoryDeduction : 0;
-        const earningsJson = computed ? JSON.stringify(computed.earnings) : null;
-        const deductionsJson = computed ? JSON.stringify(computed.deductions) : null;
+        const rate = computed.ratePerDay;
+        const g = computed.gross;
+        const statutory = computed.statutoryDeduction;
+        const earningsJson = JSON.stringify(computed.earnings);
+        const deductionsJson = JSON.stringify(computed.deductions);
+        const employerJson = JSON.stringify(computed.employer || []);
+        const billingJson = JSON.stringify(computed.billing || {});
+        const employerCost = computed.employerCost || 0;
+        const ctc = computed.ctc ?? g;
 
         // Recover advances that have been paid but not yet recovered.
         const outstanding = Number(q.scalar(
@@ -134,9 +143,9 @@ router.post(
           `INSERT INTO payroll_lines
              (period_id, employment_id, days_in_period, present_days, training_days, transit_days,
               leave_days, left_days, payable_days, rate_per_day, salary_structure_id, structure_code,
-              earnings_json, deductions_json, statutory_deduction, gross, advance_deduction,
-              other_deduction, net_payable)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+              earnings_json, deductions_json, statutory_deduction, employer_cost, ctc,
+              employer_json, billing_json, gross, advance_deduction, other_deduction, net_payable)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(period_id, employment_id) DO UPDATE SET
              days_in_period = excluded.days_in_period, present_days = excluded.present_days,
              training_days = excluded.training_days, transit_days = excluded.transit_days,
@@ -146,13 +155,16 @@ router.post(
              structure_code = excluded.structure_code,
              earnings_json = excluded.earnings_json, deductions_json = excluded.deductions_json,
              statutory_deduction = excluded.statutory_deduction,
+             employer_cost = excluded.employer_cost, ctc = excluded.ctc,
+             employer_json = excluded.employer_json, billing_json = excluded.billing_json,
              gross = excluded.gross, advance_deduction = excluded.advance_deduction,
              net_payable = excluded.gross - excluded.statutory_deduction
                            - excluded.advance_deduction - payroll_lines.other_deduction
            WHERE payroll_lines.status IN ('pending','held')`,
           row.id, emp.id, t.applicable, t.counts.P, t.counts.T, t.counts.TA, t.counts.L, t.counts.LE,
           t.payableDays, rate, structure?.id || null, structure?.code || null,
-          earningsJson, deductionsJson, statutory, g, advanceDeduction, otherDeduction, netPayable,
+          earningsJson, deductionsJson, statutory, employerCost, ctc, employerJson, billingJson,
+          g, advanceDeduction, otherDeduction, netPayable,
         );
         gross += g;
         net += netPayable;
@@ -273,11 +285,18 @@ router.patch(
     const structure = loadStructure(line.salary_structure_id);
     if (structure) {
       const monthDays = daysInPeriod(period.period);
-      const computed = computeSalary(structure, payableDays, monthDays);
+      const lsaMonthly = Number(q.scalar(
+        'SELECT lsa_monthly FROM employments WHERE id = ?', line.employment_id,
+      )) || 0;
+      const computed = computeSalary(structure, payableDays, monthDays, { lsaMonthly });
       patch.gross = computed.gross;
       patch.statutory_deduction = computed.statutoryDeduction;
       patch.earnings_json = JSON.stringify(computed.earnings);
       patch.deductions_json = JSON.stringify(computed.deductions);
+      patch.employer_json = JSON.stringify(computed.employer || []);
+      patch.billing_json = JSON.stringify(computed.billing || {});
+      patch.employer_cost = computed.employerCost || 0;
+      patch.ctc = computed.ctc ?? computed.gross;
     } else {
       patch.gross = money(payableDays * merged.rate_per_day);
       patch.statutory_deduction = 0;
@@ -293,6 +312,74 @@ router.patch(
     );
     audit(req.user.id, 'payroll_line', line.id, 'edited', patch);
     res.json(q.get('SELECT * FROM payroll_lines WHERE id = ?', line.id));
+  }),
+);
+
+/**
+ * The pay register in the client's own layouts: an HZL DRIVER sheet and a
+ * SURAT DRIVER sheet, laid out column for column like the registers the
+ * client sends, plus a plain sheet for anyone on another structure or a flat
+ * wage. Net payable is worked out from each driver's attendance through the
+ * same engine as payroll, so the register and the payment sheet always agree.
+ */
+router.get(
+  '/periods/:period/pay-register',
+  h(async (req, res) => {
+    const period = req.params.period;
+    const row = getPeriod(period);
+    if (!row) throw notFound('Payroll period not found — collate it first');
+    const daysInMonth = daysInPeriod(period);
+
+    const lines = q.all(
+      `SELECT l.*, d.name, d.registration_no, d.uan_no, d.bank_account_no, d.bank_ifsc,
+              d.bank_name, d.bank_branch, e.client_id, e.location, e.date_of_joining, e.date_of_leaving,
+              e.lsa_monthly, e.monthly_wage
+       FROM payroll_lines l JOIN employments e ON e.id = l.employment_id
+       JOIN drivers d ON d.id = e.driver_id
+       WHERE l.period_id = ? ORDER BY e.location, d.name`,
+      row.id,
+    );
+    if (!lines.length) throw bad(`There are no payroll lines for ${period} — collate the month first`);
+
+    // One sheet per structure, in the layout that structure asks for.
+    const groups = new Map();
+    for (const l of lines) {
+      const structure = l.salary_structure_id ? loadStructure(l.salary_structure_id) : null;
+      const key = structure ? `s${structure.id}` : 'flat';
+      if (!groups.has(key)) {
+        groups.set(key, {
+          format: structure?.register_format || 'standard',
+          structure: structure || flatStructure(0),
+          daysInMonth,
+          lines: [],
+        });
+      }
+      groups.get(key).lines.push(
+        registerLine(l, structure || flatStructure(l.monthly_wage), period, daysInMonth),
+      );
+    }
+
+    const setting = (key, fallback) =>
+      q.get('SELECT value FROM app_settings WHERE key = ?', key)?.value || fallback;
+    const buf = await buildPayRegister({
+      period,
+      groups: [...groups.values()],
+      meta: {
+        clientName: setting('client_name', 'QUANTUM CORPSERV (INDIA) PRIVATE LIMITED'),
+        vendorName: setting('vendor_name', 'Dynamic India Management Association & Consulting'),
+        contractor: setting('contractor_code', 'DIMAC'),
+        pfEstablishmentNo: setting('pf_establishment_no', 'DSNHP2391164000'),
+      },
+    });
+
+    const filename = `pay-register-${period}.xlsx`;
+    saveBuffer(buf, {
+      filename, mime: XLSX_MIME, ownerType: 'payroll', ownerId: row.id, kind: 'register', userId: req.user.id,
+    });
+    audit(req.user.id, 'payroll', period, 'pay_register_downloaded', { lines: lines.length });
+    res.setHeader('Content-Type', XLSX_MIME);
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(buf);
   }),
 );
 

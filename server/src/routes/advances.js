@@ -42,20 +42,39 @@ function actionsFor(user, adv) {
  * been given to the driver for the month and how much salary is accrued as per
  * attendance." Both numbers are computed here and travel with every request.
  */
-export function approvalContext(driverId, onDate = today()) {
+export function approvalContext(driverId, onDate = today(), excludeId = null) {
   const period = onDate.slice(0, 7);
   const monthStart = `${period}-01`;
 
-  const advancesThisMonth = money(Number(q.scalar(
+  /**
+   * Advances in this month, by state, always excluding the request being
+   * decided on. Counting a request inside the total it is being weighed
+   * against double-counts it and makes the driver's position look worse than
+   * it is -- so `excludeId` is left out of every figure here, and the request
+   * amount is added back once by the caller.
+   */
+  const monthSum = (statuses) => money(Number(q.scalar(
     `SELECT COALESCE(sum(amount), 0) FROM advances
       WHERE driver_id = ? AND request_date BETWEEN ? AND ?
-        AND status IN ('pending_approval','approved','paid')`,
-    driverId, monthStart, onDate,
+        AND status IN (${statuses.map(() => '?').join(',')})
+        AND (? IS NULL OR id <> ?)`,
+    driverId, monthStart, onDate, ...statuses, excludeId, excludeId,
   )));
+
+  // Asked for but not yet decided.
+  const requestedThisMonth = monthSum(['pending_approval']);
+  // Signed off — money either already out of the door or committed to go.
+  const approvedThisMonth = monthSum(['approved']);
+  const paidThisMonth = monthSum(['paid']);
+  const advancesThisMonth = money(requestedThisMonth + approvedThisMonth + paidThisMonth);
+
+  // Everything paid out and not yet recovered through salary, whatever month
+  // it came from — this is what the driver still owes back.
   const outstanding = money(Number(q.scalar(
     `SELECT COALESCE(sum(amount - recovered), 0) FROM advances
-      WHERE driver_id = ? AND status IN ('approved','paid')`,
-    driverId,
+      WHERE driver_id = ? AND status IN ('approved','paid')
+        AND (? IS NULL OR id <> ?)`,
+    driverId, excludeId, excludeId,
   )));
 
   const emp = q.get(
@@ -91,6 +110,21 @@ export function approvalContext(driverId, onDate = today()) {
     };
   }
 
+  // The advances behind those totals. An approver judging "another one?" wants
+  // to see the pattern -- how often, how much, and whether the last few have
+  // been recovered -- not just the sum.
+  const history = q.all(
+    `SELECT a.id, a.request_date, a.amount, a.reason, a.status, a.paid_at, a.utr,
+            a.recovered, u.name AS requested_by_name, au.name AS approved_by_name
+       FROM advances a
+       LEFT JOIN users u ON u.id = a.requested_by
+       LEFT JOIN users au ON au.id = a.approved_by
+      WHERE a.driver_id = ? AND (? IS NULL OR a.id <> ?)
+      ORDER BY a.request_date DESC, a.id DESC
+      LIMIT 50`,
+    driverId, excludeId, excludeId,
+  ).map((r) => ({ ...r, outstanding: money(r.amount - r.recovered) }));
+
   return {
     period,
     asOn: onDate,
@@ -98,7 +132,20 @@ export function approvalContext(driverId, onDate = today()) {
     outstanding,
     ...accrued,
     // What is left of this month's earnings once advances are taken off.
+    // What is left of this month's earnings before this request is counted.
     headroom: money(accrued.accruedSalary - advancesThisMonth),
+    requestedThisMonth,
+    approvedThisMonth,
+    paidThisMonth,
+    history,
+    historyTotals: {
+      count: history.length,
+      paid: history.filter((h) => h.status === 'paid').length,
+      rejected: history.filter((h) => h.status === 'rejected').length,
+      lifetime: money(history
+        .filter((h) => ['approved', 'paid'].includes(h.status))
+        .reduce((sum, h) => sum + h.amount, 0)),
+    },
   };
 }
 
@@ -208,7 +255,7 @@ router.post(
     if (!adv) throw notFound('Advance request not found');
     if (!['approve', 'reject'].includes(req.body.decision)) throw bad('decision must be approve or reject');
     const approve = req.body.decision === 'approve';
-    const remarks = req.body.remarks || null;
+    let remarks = req.body.remarks || null;
 
     if (adv.status !== 'pending_approval') {
       throw bad(`This request is ${adv.status} and cannot be actioned`);
@@ -219,16 +266,31 @@ router.post(
       );
     }
 
+    // An approver may sign off a different figure to the one asked for -- the
+    // usual case is trimming it to what the driver has actually earned. The
+    // change is recorded in the remarks and the audit log, never silently.
+    let amount = adv.amount;
+    if (approve && req.body.amount !== undefined && req.body.amount !== null && req.body.amount !== '') {
+      amount = money(num(req.body.amount, 'Approved amount', { min: 1, max: 500000 }));
+      if (amount !== adv.amount) {
+        const note = `Approved at ${amount} against ${adv.amount} requested`;
+        remarks = remarks ? `${remarks} — ${note}` : note;
+      }
+    }
+
     q.run(
-      `UPDATE advances SET status = ?, approved_by = ?, approved_at = datetime('now'),
-                           approval_remarks = ? WHERE id = ?`,
-      approve ? 'approved' : 'rejected', req.user.id, remarks, adv.id,
+      `UPDATE advances SET status = ?, amount = ?, approved_by = ?,
+                           approved_at = datetime('now'), approval_remarks = ? WHERE id = ?`,
+      approve ? 'approved' : 'rejected', amount, req.user.id, remarks, adv.id,
     );
 
-    audit(req.user.id, 'advance', adv.id, approve ? 'approved' : 'rejected', { remarks });
+    audit(req.user.id, 'advance', adv.id, approve ? 'approved' : 'rejected', {
+      remarks,
+      ...(amount !== adv.amount ? { requestedAmount: adv.amount, approvedAmount: amount } : {}),
+    });
     res.json({
       ...q.get(`${SELECT} WHERE a.id = ?`, adv.id),
-      context: approvalContext(adv.driver_id, adv.request_date),
+      context: approvalContext(adv.driver_id, adv.request_date, adv.id),
     });
   }),
 );
@@ -239,7 +301,7 @@ router.get(
   h(async (req, res) => {
     const adv = q.get('SELECT * FROM advances WHERE id = ?', Number(req.params.id));
     if (!adv) throw notFound('Advance request not found');
-    res.json(approvalContext(adv.driver_id, adv.request_date));
+    res.json(approvalContext(adv.driver_id, adv.request_date, adv.id));
   }),
 );
 
@@ -280,7 +342,7 @@ router.get(
   h(async (req, res) => {
     const rows = q.all(
       `${SELECT} WHERE a.status = 'approved' AND a.batch_id IS NULL
-       ORDER BY a.request_date, a.approved_at`,
+       ORDER BY a.request_date DESC, a.approved_at DESC`,
     );
     const groups = {};
     rows.forEach((r) => {
@@ -296,12 +358,20 @@ router.get(
       groups[key].total = money(groups[key].total + r.amount);
     });
 
-    const list = Object.values(groups).map((g) => ({
-      ...g,
-      count: g.items.length,
-      // <= 4 requests: pay through internet banking. More than that: bank sheet.
-      suggestedMethod: g.items.length <= config.rules.netbankingMaxRequests ? 'netbanking' : 'sheet',
-    }));
+    // Newest run first: the money waiting to go out today is what Finance is
+    // looking for, not a request from six weeks ago. Two runs share a date, so
+    // the evening window sorts above the noon one on the same day.
+    const windowRank = { EVENING: 1, NOON: 0 };
+    const list = Object.values(groups)
+      .sort((a, b) => (
+        b.date.localeCompare(a.date) || windowRank[b.cutoff] - windowRank[a.cutoff]
+      ))
+      .map((g) => ({
+        ...g,
+        count: g.items.length,
+        // <= 4 requests: pay through internet banking. More than that: bank sheet.
+        suggestedMethod: g.items.length <= config.rules.netbankingMaxRequests ? 'netbanking' : 'sheet',
+      }));
     res.json({
       groups: list,
       total: money(rows.reduce((s, r) => s + r.amount, 0)),

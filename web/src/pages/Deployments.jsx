@@ -118,6 +118,7 @@ function EditModal({ employment, onClose, onDone }) {
     location: employment.location || '',
     monthly_wage: employment.monthly_wage || 0,
     salary_structure_id: employment.salary_structure_id || '',
+    lsa_monthly: employment.lsa_monthly || 0,
   });
   const [busy, setBusy] = useState(false);
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
@@ -163,9 +164,14 @@ function EditModal({ employment, onClose, onDone }) {
           ))}
         </select>
       </Field>
-      <Field label="Monthly wage">
-        <input type="number" value={form.monthly_wage} onChange={set('monthly_wage')} />
-      </Field>
+      <div className="grid c2">
+        <Field label="Monthly wage">
+          <input type="number" value={form.monthly_wage} onChange={set('monthly_wage')} />
+        </Field>
+        <Field label="LSA / month" hint="loyalty allowance, if the structure pays one">
+          <input type="number" min={0} value={form.lsa_monthly} onChange={set('lsa_monthly')} />
+        </Field>
+      </div>
       {structureChanged && chosen && (
         <div className="banner">
           <span>ℹ</span>

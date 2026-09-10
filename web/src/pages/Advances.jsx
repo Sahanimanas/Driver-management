@@ -227,13 +227,26 @@ function NewRequest({ onClose, onDone }) {
 function DecisionModal({ a, decision, onClose, onDone }) {
   const toast = useToast();
   const [remarks, setRemarks] = useState('');
+  // The approver may sign off a smaller (or larger) figure than was asked for.
+  const [amount, setAmount] = useState(a.amount);
   const [busy, setBusy] = useState(false);
+
+  const adjusted = decision === 'approve' && Number(amount) !== Number(a.amount);
+  const valid = decision !== 'approve' || Number(amount) > 0;
 
   async function submit() {
     setBusy(true);
     try {
-      await api.post(`/advances/${a.id}/decision`, { decision, remarks });
-      toast.success(decision === 'approve' ? 'Request approved' : 'Request rejected');
+      await api.post(`/advances/${a.id}/decision`, {
+        decision,
+        remarks,
+        ...(decision === 'approve' ? { amount } : {}),
+      });
+      toast.success(decision === 'approve'
+        ? (adjusted
+          ? `Approved at ${inr(amount)} against ${inr(a.amount)} requested`
+          : 'Request approved')
+        : 'Request rejected');
       onDone();
     } catch (err) {
       toast.error(err);
@@ -246,18 +259,26 @@ function DecisionModal({ a, decision, onClose, onDone }) {
     <Modal title={`${decision === 'approve' ? 'Approve' : 'Reject'} — ${a.driver_name}`} onClose={onClose}
       footer={<>
         <button onClick={onClose}>Cancel</button>
-        <button className={decision === 'approve' ? 'good' : 'danger'} onClick={submit} disabled={busy}>
-          {busy ? <span className="spinner" /> : decision === 'approve' ? 'Approve' : 'Reject'}
+        <button className={decision === 'approve' ? 'good' : 'danger'} onClick={submit}
+          disabled={busy || !valid}>
+          {busy ? <span className="spinner" />
+            : decision === 'approve'
+              ? (adjusted ? `Approve ${inr(amount)}` : 'Approve')
+              : 'Reject'}
         </button>
       </>}>
       <dl className="kv">
         <dt>Driver</dt><dd><b>{a.driver_name}</b> · <span className="mono">{a.client_id}</span></dd>
-        <dt>Amount</dt><dd><b>{inr(a.amount)}</b></dd>
+        <dt>Amount requested</dt><dd><b>{inr(a.amount)}</b></dd>
         <dt>Reason</dt><dd>{a.reason}</dd>
         <dt>Requested on</dt><dd>{date(a.request_date)} by {a.requested_by_name}</dd>
       </dl>
 
-      <ApprovalContext advanceId={a.id} amount={a.amount} />
+      <ApprovalContext
+        advanceId={a.id}
+        amount={amount}
+        onAmountChange={decision === 'approve' ? setAmount : undefined}
+      />
       <Field label="Remarks" hint="optional">
         <textarea value={remarks} onChange={(e) => setRemarks(e.target.value)} style={{ minHeight: 60 }} />
       </Field>
@@ -270,53 +291,161 @@ function DecisionModal({ a, decision, onClose, onDone }) {
  * been given to the driver for the month and how much salary is accrued as per
  * attendance." Both, plus what is left once this request is met.
  */
-function ApprovalContext({ advanceId, amount }) {
+function ApprovalContext({ advanceId, amount, onAmountChange }) {
   const { data, error } = useAsync(() => api.get(`/advances/${advanceId}/context`), [advanceId]);
 
   if (error) return <div className="banner error"><span>⚠</span><div>{error.message}</div></div>;
   if (!data) return <div className="loading"><span className="spinner" /> Loading the driver's position…</div>;
 
-  // What this driver has earned so far this month, less what has already been
-  // advanced and what is being asked for now.
-  const afterThis = Math.round((data.headroom - Number(amount)) * 100) / 100;
-  const overdrawn = afterThis < 0;
+  const asked = Number(amount) || 0;
+
+  // Everything already committed this month, then this request on top. The
+  // context deliberately excludes this request from its own totals, so it is
+  // added exactly once here.
+  const committed = data.advancesThisMonth;
+  const withThis = round2(committed + asked);
+  const earned = data.accruedSalary;
+
+  // Positive: the company still owes the driver this at month end.
+  // Negative: the driver has taken more than they have earned and carries it.
+  const balance = round2(earned - withThis);
+  const over = balance < 0;
 
   return (
-    <div className={`banner ${overdrawn ? 'error' : ''}`} style={{ marginTop: 4 }}>
-      <span>{overdrawn ? '⚠' : '₹'}</span>
-      <div style={{ flex: 1 }}>
-        <table className="tbl">
-          <tbody>
-            <tr>
-              <td>Advances this month ({data.period})</td>
-              <td className="num"><b>{inr(data.advancesThisMonth)}</b></td>
-            </tr>
-            <tr>
-              <td>Salary accrued as per attendance</td>
-              <td className="num">
-                <b>{inr(data.accruedSalary)}</b>
-                <div className="muted small">
-                  {data.payableDays} payable day(s) at {inr(data.ratePerDay)}/day
-                </div>
-              </td>
-            </tr>
-            <tr>
-              <td>Unrecovered advance outstanding</td>
-              <td className="num"><b>{inr(data.outstanding)}</b></td>
-            </tr>
-            <tr>
-              <td><b>Left after this request</b></td>
-              <td className="num">
-                <b style={{ color: overdrawn ? 'var(--red)' : 'var(--green)' }}>{inr(afterThis)}</b>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-        {overdrawn && (
-          <div className="small" style={{ marginTop: 6 }}>
-            This request takes the driver past what they have earned so far this month.
+    <>
+      <div className="ledger">
+        <div className="grp">
+          <div className="grp-head">Advances this month ({data.period})</div>
+          <Line label="Requested, awaiting approval" value={data.requestedThisMonth} muted />
+          <Line label="Approved, not yet paid" value={data.approvedThisMonth} muted />
+          <Line label="Already paid out" value={data.paidThisMonth} muted />
+          <Line label="Committed before this request" value={committed} sub />
+        </div>
+
+        <div className="grp">
+          <div className="grp-head">Earned so far</div>
+          <Line
+            label="Salary accrued as per attendance"
+            value={earned}
+            note={`${data.payableDays} payable day(s) at ${inr(data.ratePerDay)}/day`}
+          />
+        </div>
+
+        <div className="grp">
+          <div className="grp-head">This request</div>
+          <div className="ln">
+            <span>Amount to approve</span>
+            <span className="v">
+              <input
+                type="number" min={0} step={100} value={amount}
+                onChange={(e) => onAmountChange?.(e.target.value)}
+                disabled={!onAmountChange}
+                style={{ width: 130, textAlign: 'right' }}
+              />
+            </span>
+          </div>
+          <Line label="Total advances once approved" value={withThis} sub />
+        </div>
+
+        <div className={`grp final ${over ? 'over' : 'ok'}`}>
+          <div className="ln big">
+            <span>{over ? 'Driver would owe back' : 'Still payable to the driver'}</span>
+            <span className="v"><b>{inr(Math.abs(balance))}</b></span>
+          </div>
+          <div className="small muted" style={{ marginTop: 4 }}>
+            {over
+              ? `Advances would exceed what ${inr(earned)} of attendance has earned. `
+                + `The excess is carried and recovered from a later month.`
+              : `After this advance, ${inr(balance)} of this month's earnings remains to pay at month end.`}
+          </div>
+        </div>
+
+        {data.outstanding > 0 && (
+          <div className="grp">
+            <Line
+              label="Unrecovered from earlier months"
+              value={data.outstanding}
+              note="recovered automatically from salary"
+              muted
+            />
           </div>
         )}
+      </div>
+
+      <AdvanceHistory history={data.history} totals={data.historyTotals} />
+    </>
+  );
+}
+
+const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
+/** One line of the ledger. `sub` marks a subtotal, `muted` a contributing row. */
+function Line({ label, value, note, sub, muted }) {
+  return (
+    <div className={`ln${sub ? ' sub' : ''}${muted ? ' muted-row' : ''}`}>
+      <span>
+        {label}
+        {note && <div className="small muted">{note}</div>}
+      </span>
+      <span className="v">{sub ? <b>{inr(value)}</b> : inr(value)}</span>
+    </div>
+  );
+}
+
+/**
+ * Every earlier advance for this driver, newest first.
+ *
+ * The totals above answer "how much"; this answers "how often, and did the
+ * last ones get recovered" — which is the part an approver is really weighing
+ * on a repeat request. Fixed height and scrolled, so a driver with a long
+ * history cannot push the Approve button off the screen.
+ */
+function AdvanceHistory({ history, totals }) {
+  if (!history?.length) {
+    return (
+      <div className="muted small" style={{ marginTop: 12 }}>
+        No earlier advances for this driver — this is their first request.
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ marginTop: 14 }}>
+      <div className="row wrap" style={{ marginBottom: 6 }}>
+        <b className="small">Past advances</b>
+        <span className="muted small">
+          {totals.count} request(s) · {inr(totals.lifetime)} approved to date
+          {totals.rejected ? ` · ${totals.rejected} rejected` : ''}
+        </span>
+      </div>
+
+      <div className="tbl-wrap" style={{ maxHeight: 200, overflowY: 'auto' }}>
+        <table className="tbl">
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th className="num">Amount</th>
+              <th>Reason</th>
+              <th>Status</th>
+              <th className="num">Outstanding</th>
+            </tr>
+          </thead>
+          <tbody>
+            {history.map((h) => (
+              <tr key={h.id}>
+                <td className="nowrap small">{date(h.request_date)}</td>
+                <td className="num">{inr(h.amount)}</td>
+                <td className="small">{h.reason}</td>
+                <td><StatusChip value={h.status} /></td>
+                <td className="num small">
+                  {h.outstanding > 0
+                    ? <b>{inr(h.outstanding)}</b>
+                    : <span className="muted">{h.status === 'paid' ? 'recovered' : '—'}</span>}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
     </div>
   );
@@ -488,7 +617,7 @@ function PayModal({ batch, onClose, onDone }) {
   const [utrs, setUtrs] = useState({});
   const [paidAt, setPaidAt] = useState(today());
   const [busy, setBusy] = useState(false);
-  const { data, loading } = useAsync(() => api.get(`/advances/batches/${batch.id}`), [batch.id]);
+  const { data, loading, error } = useAsync(() => api.get(`/advances/batches/${batch.id}`), [batch.id]);
 
   async function submit() {
     setBusy(true);
@@ -509,7 +638,8 @@ function PayModal({ batch, onClose, onDone }) {
         <button className="primary" onClick={submit} disabled={busy}>Mark as paid</button>
       </>}>
       <Field label="Payment date"><input type="date" value={paidAt} onChange={(e) => setPaidAt(e.target.value)} /></Field>
-      {!data ? (error ? null : <Loading />) : (
+      <ErrorBanner error={error} />
+      {!data ? (error ? null : <Loading what="the requests in this run" />) : (
         <table className="tbl">
           <thead><tr><th>Driver</th><th className="num">Amount</th><th>Account</th><th>UTR / reference</th></tr></thead>
           <tbody>

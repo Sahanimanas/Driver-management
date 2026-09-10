@@ -247,8 +247,8 @@ router.post(
         `INSERT INTO drivers
           (registration_no, name, phone, aadhar_no, address, dob_aadhar, dl_no, dl_dob,
            dl_valid_from, dl_valid_till, bank_account_name, bank_account_no, bank_ifsc, bank_name,
-           uan_no, referred_by, scan_id, remarks, created_by)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+           bank_branch, uan_no, referred_by, scan_id, remarks, created_by)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         registrationNo,
         p.name.trim(),
         digits(p.phone).slice(-10),
@@ -263,6 +263,7 @@ router.post(
         p.bank_account_no ? digits(p.bank_account_no) : null,
         p.bank_ifsc ? String(p.bank_ifsc).toUpperCase() : null,
         p.bank_name || null,
+        p.bank_branch ? String(p.bank_branch).trim() : null,
         p.uan_no ? digits(p.uan_no) : null,
         p.referred_by ? String(p.referred_by).trim() : null,
         p.scan_id || null,
@@ -317,7 +318,8 @@ router.post(
 // ---------------------------------------------------------------- edit
 const EDITABLE = [
   'name', 'phone', 'address', 'dob_aadhar', 'dl_no', 'dl_dob', 'dl_valid_from', 'dl_valid_till',
-  'bank_account_name', 'bank_account_no', 'bank_ifsc', 'bank_name', 'uan_no', 'referred_by', 'remarks',
+  'bank_account_name', 'bank_account_no', 'bank_ifsc', 'bank_name', 'bank_branch', 'uan_no', 'referred_by',
+  'remarks',
 ];
 
 router.patch(

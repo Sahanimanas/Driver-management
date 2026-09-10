@@ -3,6 +3,7 @@ import { q, tx, audit } from '../db.js';
 import { authenticate, allow } from '../auth.js';
 import { buildWorkbook, XLSX_MIME } from '../excel.js';
 import { h, need, bad, notFound, isDate, today, money, num, oneOf } from '../util.js';
+import { computePay } from '../payroll/engine.js';
 
 const router = Router();
 router.use(authenticate);
@@ -26,6 +27,10 @@ export const CATEGORY_LABEL = { HZL: 'HZL Drivers', MARKET: 'Market Drivers' };
 
 const CALCS = ['fixed', 'percent_of_basic', 'percent_of_gross'];
 const KINDS = ['earning', 'deduction'];
+const ROUNDINGS = ['none', 'rupee'];
+const BASES = ['earned', 'fixed'];
+const FORMATS = ['standard', 'hzl', 'surat'];
+const CONDITION_RE = /^(days_gte|gross_gt|gross_lte):\d+(\.\d+)?$/;
 
 const withComponents = (row) => ({
   ...row,
@@ -42,61 +47,28 @@ const withComponents = (row) => ({
  * @param {number} payableDays  P + T + TA for the month
  * @param {number} daysInMonth  calendar days in the month
  */
-export function computeSalary(structure, payableDays, daysInMonth) {
-  const components = structure.components || [];
-  const factor = daysInMonth > 0 ? Math.min(1, payableDays / daysInMonth) : 0;
-
-  const basicRow = components.find((c) => /^basic/i.test(c.name) && c.kind === 'earning');
-  const fullBasic = basicRow ? Number(basicRow.value) : 0;
-
-  // Earnings first: a percentage component needs the gross it is a share of,
-  // so the fixed and percent-of-basic lines are settled before percent-of-gross.
-  const earnings = [];
-  let grossFull = 0;
-
-  for (const c of components.filter((x) => x.kind === 'earning')) {
-    let full;
-    if (c.calc === 'fixed') full = Number(c.value);
-    else if (c.calc === 'percent_of_basic') full = (fullBasic * Number(c.value)) / 100;
-    else full = 0;   // percent_of_gross, settled below
-    grossFull += full;
-    earnings.push({ ...c, full });
-  }
-  for (const e of earnings) {
-    if (e.calc === 'percent_of_gross') {
-      e.full = (grossFull * Number(e.value)) / 100;
-      grossFull += e.full;
-    }
-  }
-
-  let gross = 0;
-  const earningLines = earnings.map((e) => {
-    const amount = money(e.prorated ? e.full * factor : e.full);
-    gross = money(gross + amount);
-    return { name: e.name, calc: e.calc, value: e.value, prorated: Boolean(e.prorated), amount };
+export function computeSalary(structure, payableDays, daysInMonth, extra = {}) {
+  // The arithmetic lives in payroll/engine.js, where it is checked row for row
+  // against the client's own registers. This keeps the shape callers expect.
+  const p = computePay(structure, {
+    payableDays,
+    daysInMonth,
+    presentDays: extra.presentDays ?? payableDays,
+    lsaMonthly: extra.lsaMonthly ?? 0,
   });
-
-  let deduction = 0;
-  const deductionLines = components
-    .filter((c) => c.kind === 'deduction')
-    .map((c) => {
-      let full;
-      if (c.calc === 'fixed') full = Number(c.value);
-      else if (c.calc === 'percent_of_basic') full = (fullBasic * Number(c.value)) / 100;
-      else full = (grossFull * Number(c.value)) / 100;
-      const amount = money(c.prorated ? full * factor : full);
-      deduction = money(deduction + amount);
-      return { name: c.name, calc: c.calc, value: c.value, prorated: Boolean(c.prorated), amount };
-    });
-
   return {
-    earnings: earningLines,
-    deductions: deductionLines,
-    gross,
-    statutoryDeduction: deduction,
-    net: money(gross - deduction),
-    monthlyGross: money(grossFull),
-    ratePerDay: money(daysInMonth > 0 ? grossFull / daysInMonth : 0),
+    earnings: p.earnings,
+    deductions: p.deductions,
+    employer: p.employer,
+    gross: p.gross,
+    statutoryDeduction: p.totalDeduction,
+    net: p.net,
+    employerCost: p.employerCost,
+    ctc: p.ctc,
+    billing: p.billing,
+    exact: p.exact,
+    monthlyGross: p.monthlyGross,
+    ratePerDay: p.ratePerDay,
   };
 }
 
@@ -121,7 +93,10 @@ function refreshGross(structureId) {
 
 // -------------------------------------------------------------------- list
 router.get('/meta', (_req, res) => {
-  res.json({ categories: CATEGORIES, categoryLabels: CATEGORY_LABEL, calcs: CALCS, kinds: KINDS });
+  res.json({
+    categories: CATEGORIES, categoryLabels: CATEGORY_LABEL, calcs: CALCS, kinds: KINDS,
+    roundings: ROUNDINGS, bases: BASES, formats: FORMATS,
+  });
 });
 
 router.get(
@@ -157,17 +132,75 @@ router.get(
 // ------------------------------------------------------------ create / edit
 function readComponents(input) {
   if (!Array.isArray(input)) throw bad('components must be a list');
-  return input
+  const list = input
     .filter((c) => c && String(c.name || '').trim())
-    .map((c, i) => ({
-      seq: Number.isFinite(Number(c.seq)) ? Number(c.seq) : i,
-      name: String(c.name).trim(),
-      kind: oneOf(c.kind || 'earning', KINDS, 'component kind'),
-      calc: oneOf(c.calc || 'fixed', CALCS, 'component calc'),
-      value: money(num(c.value, `${c.name} value`, { min: 0, max: 10000000 })),
-      prorated: c.prorated === false || c.prorated === 0 ? 0 : 1,
-      notes: c.notes ? String(c.notes).trim() : null,
-    }));
+    .map((c, i) => {
+      const name = String(c.name).trim();
+      const condition = String(c.condition || '').trim() || null;
+      if (condition && !CONDITION_RE.test(condition)) {
+        throw bad(`${name}: a condition looks like days_gte:30, gross_gt:12000 or gross_lte:21000`);
+      }
+      return {
+        seq: Number.isFinite(Number(c.seq)) ? Number(c.seq) : i,
+        name,
+        kind: oneOf(c.kind || 'earning', KINDS, 'component kind'),
+        calc: oneOf(c.calc || 'fixed', CALCS, 'component calc'),
+        value: money(num(c.value, `${name} value`, { min: 0, max: 10000000 })),
+        prorated: c.prorated === false || c.prorated === 0 ? 0 : 1,
+        rounding: oneOf(c.rounding || 'none', ROUNDINGS, 'component rounding'),
+        basis: oneOf(c.basis || 'earned', BASES, 'component basis'),
+        cap: money(num(c.cap || 0, `${name} cap`, { min: 0, max: 10000000 })),
+        condition,
+        employer: c.employer ? 1 : 0,
+        per_driver: c.per_driver ? 1 : 0,
+        is_basic: c.is_basic ? 1 : 0,
+        notes: c.notes ? String(c.notes).trim() : null,
+      };
+    });
+
+  if (list.filter((c) => c.is_basic).length > 1) {
+    throw bad('Only one component can be marked as the basic');
+  }
+  list.forEach((c) => {
+    if (c.employer && c.kind !== 'deduction') {
+      throw bad(`${c.name}: an employer contribution is entered as a deduction-type line`);
+    }
+    if (c.per_driver && c.kind !== 'earning') {
+      throw bad(`${c.name}: an amount set per driver must be an earning`);
+    }
+    if (c.condition && c.kind === 'earning' && !c.condition.startsWith('days_')) {
+      throw bad(`${c.name}: an earning can only depend on days (days_gte:N) — gross isn't known yet`);
+    }
+  });
+  return list;
+}
+
+/** Insert one component with every rule it carries. */
+function insertComponent(structureId, c) {
+  q.run(
+    `INSERT INTO salary_components(structure_id, seq, name, kind, calc, value, prorated,
+       rounding, basis, cap, condition, employer, per_driver, is_basic, notes)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    structureId, c.seq, c.name, c.kind, c.calc, c.value, c.prorated,
+    c.rounding, c.basis, c.cap, c.condition, c.employer, c.per_driver, c.is_basic, c.notes,
+  );
+}
+
+/** Billing and register fields a structure may carry. */
+function billingPatch(body) {
+  const out = {};
+  if (body.service_charge !== undefined) {
+    out.service_charge = money(num(body.service_charge || 0, 'Service charge', { min: 0, max: 1000000 }));
+  }
+  if (body.gst_rate !== undefined) out.gst_rate = money(num(body.gst_rate || 0, 'GST rate', { min: 0, max: 100 }));
+  if (body.tds_rate !== undefined) out.tds_rate = money(num(body.tds_rate || 0, 'TDS rate', { min: 0, max: 100 }));
+  if (body.register_format !== undefined) {
+    out.register_format = oneOf(body.register_format || 'standard', FORMATS, 'register format');
+  }
+  if (body.role_label !== undefined) {
+    out.role_label = body.role_label ? String(body.role_label).trim().slice(0, 80) : null;
+  }
+  return out;
 }
 
 router.post(
@@ -195,12 +228,15 @@ router.post(
         code, String(req.body.name).trim(), category, effectiveFrom,
         money(req.body.ot_rate_hour || 0), req.body.notes || null, req.user.id,
       );
-      components.forEach((c) =>
+      const extra = billingPatch(req.body);
+      if (Object.keys(extra).length) {
         q.run(
-          `INSERT INTO salary_components(structure_id, seq, name, kind, calc, value, prorated, notes)
-           VALUES (?,?,?,?,?,?,?,?)`,
-          newId, c.seq, c.name, c.kind, c.calc, c.value, c.prorated, c.notes,
-        ));
+          `UPDATE salary_structures SET ${Object.keys(extra).map((k) => `${k} = ?`).join(', ')} WHERE id = ?`,
+          ...Object.values(extra), newId,
+        );
+      }
+      components.forEach((c) =>
+        insertComponent(newId, c));
       audit(req.user.id, 'salary_structure', newId, 'created', { code, category });
       return newId;
     });
@@ -226,6 +262,7 @@ router.patch(
       patch.effective_from = req.body.effective_from;
     }
     if (req.body.ot_rate_hour !== undefined) patch.ot_rate_hour = money(req.body.ot_rate_hour);
+    Object.assign(patch, billingPatch(req.body));
     if (req.body.notes !== undefined) patch.notes = req.body.notes || null;
     if (req.body.active !== undefined) patch.active = req.body.active ? 1 : 0;
 
@@ -244,11 +281,7 @@ router.patch(
         }
         q.run('DELETE FROM salary_components WHERE structure_id = ?', id);
         components.forEach((c) =>
-          q.run(
-            `INSERT INTO salary_components(structure_id, seq, name, kind, calc, value, prorated, notes)
-             VALUES (?,?,?,?,?,?,?,?)`,
-            id, c.seq, c.name, c.kind, c.calc, c.value, c.prorated, c.notes,
-          ));
+          insertComponent(id, c));
       }
       audit(req.user.id, 'salary_structure', id, 'updated', patch);
     });
@@ -295,7 +328,9 @@ router.get(
       structure: { id: structure.id, code: structure.code, name: structure.name },
       payableDays,
       daysInMonth,
-      ...computeSalary(structure, payableDays, daysInMonth),
+      ...computeSalary(structure, payableDays, daysInMonth, {
+        lsaMonthly: Number(req.query.lsa_monthly) || 0,
+      }),
     });
   }),
 );

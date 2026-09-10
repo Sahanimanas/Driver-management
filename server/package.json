@@ -10,6 +10,8 @@
     "seed": "node --no-warnings src/seed.js",
     "test:extraction": "node --no-warnings src/scripts/test-extraction.js",
     "test:api": "bash src/scripts/smoke-test.sh",
+    "test:payroll": "node --no-warnings src/scripts/test-pay-register.js",
+    "load-structures": "node --no-warnings src/scripts/load-client-structures.js",
     "scope-status": "node --no-warnings src/scripts/scope-status.js"
   },
   "dependencies": {

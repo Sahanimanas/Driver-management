@@ -353,3 +353,24 @@ label.field.invalid > textarea:focus { outline-color: var(--red); }
 
 /* A day that has not happened yet: empty, not struck out. */
 .att-cell.future { background: transparent; border: 1px dashed #e2e8f0; }
+
+/* ---- approval ledger: what is committed, what is earned, what is left ---- */
+.ledger { border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+.ledger .grp { padding: 10px 14px; border-bottom: 1px solid var(--line); }
+.ledger .grp:last-child { border-bottom: 0; }
+.ledger .grp-head {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--muted); font-weight: 650; margin-bottom: 6px;
+}
+.ledger .ln {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: 16px; padding: 3px 0; font-size: 13px;
+}
+.ledger .ln .v { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ledger .ln.muted-row { color: var(--muted); }
+.ledger .ln.sub { border-top: 1px solid var(--line); margin-top: 6px; padding-top: 7px; }
+.ledger .ln.big { font-size: 15px; font-weight: 600; }
+.ledger .grp.final.ok { background: #f2faf5; }
+.ledger .grp.final.over { background: #fdf3f2; }
+.ledger .grp.final.ok .ln.big .v { color: var(--green); }
+.ledger .grp.final.over .ln.big .v { color: var(--red); }

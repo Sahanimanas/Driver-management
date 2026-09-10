@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # End-to-end smoke test of everything that changed.
-API=http://localhost:4000/api
+# Point at another server with API=http://host:port/api npm run test:api
+API=${API:-http://localhost:4000/api}
 PASS=0; FAIL=0
 ok()   { PASS=$((PASS+1)); echo "  PASS  $1"; }
 bad()  { FAIL=$((FAIL+1)); echo "  FAIL  $1 -- $2"; }
@@ -88,6 +89,20 @@ SELF=$(curl -s -X POST "$API/advances" -H "Authorization: Bearer $SUP" -H 'Conte
   -d "{\"driver_id\":$DRV,\"amount\":800,\"reason\":\"Self approval guard\"}" | node -pe 'JSON.parse(require("fs").readFileSync(0)).advance.id')
 curl -s -X POST "$API/advances/$SELF/decision" -H "Authorization: Bearer $ADM" -H 'Content-Type: application/json' -d '{"decision":"approve"}' >/dev/null
 ok "second request approved by the other admin path exercised"
+
+# The request being decided must not be counted inside the totals it is
+# weighed against, or the driver's position reads worse than it is.
+CTX=$(curl -s -X POST "$API/advances" -H "Authorization: Bearer $SUP" -H 'Content-Type: application/json'   -d "{\"driver_id\":$DRV,\"amount\":1234,\"reason\":\"Context exclusion check\"}"   | node -pe 'JSON.parse(require("fs").readFileSync(0)).advance.id')
+EXCL=$(curl -s "$API/advances/$CTX/context" -H "Authorization: Bearer $ADM"   | node -pe 'const d=JSON.parse(require("fs").readFileSync(0));
+    const rows=(d.history||[]).filter(h=>h.id===Number(process.argv[1]));
+    `${rows.length}|${d.requestedThisMonth}`' "$CTX")
+case "$EXCL" in 0\|*) ok "the request is excluded from its own month total and history" ;;
+  *) bad "context exclusion" "own row appeared: $EXCL" ;; esac
+
+# An approver may sign off a different figure to the one asked for.
+ADJ=$(curl -s -X POST "$API/advances/$CTX/decision" -H "Authorization: Bearer $ADM"   -H 'Content-Type: application/json' -d '{"decision":"approve","amount":900}'   | node -pe 'const d=JSON.parse(require("fs").readFileSync(0)); `${d.amount}|${d.approval_remarks||""}`')
+case "$ADJ" in 900\|*900*1234*) ok "approving at an adjusted amount is stored and noted (${ADJ%%|*})" ;;
+  *) bad "adjusted approval" "got $ADJ" ;; esac
 
 echo "== expenses: threshold decides who pays =="
 LOW=$(curl -s -X POST "$API/expenses" -H "Authorization: Bearer $SUP" -H 'Content-Type: application/json' \
@@ -196,6 +211,13 @@ ONS=$(echo "$PP" | node -pe 'JSON.parse(require("fs").readFileSync(0)).onStructu
 [ "$ONS" -gt 0 ] && ok "$ONS payroll lines computed from the salary master" || bad "payroll structure" "got $ONS"
 curl -s "$API/salary/periods/$PERIOD/wage-register" -H "Authorization: Bearer $FIN" -o $TMP/wage.xlsx
 [ -s $TMP/wage.xlsx ] && ok "wage register downloads" || bad "wage register" "empty"
+PR=$(curl -s -o "$TMP/pay.xlsx" -w "%{http_code}" "$API/salary/periods/$PERIOD/pay-register" -H "Authorization: Bearer $FIN")
+SHEETS=$(node -e '
+  const E = require("exceljs"); const wb = new E.Workbook();
+  wb.xlsx.readFile(process.argv[1]).then(() => console.log(wb.worksheets.map((w) => w.name).join(", ")))
+    .catch(() => console.log(""));' "$TMP/pay.xlsx")
+if [ "$PR" = "200" ] && [ -n "$SHEETS" ]; then ok "pay register downloads in the client layout ($SHEETS)";
+else bad "pay register" "HTTP $PR, sheets: $SHEETS"; fi
 
 echo "== scan endpoint =="
 SCAN=$(curl -s -X POST "$API/drivers/scan" -H "Authorization: Bearer $SUP" -F 'text=Driver Name : RAJU SINGH

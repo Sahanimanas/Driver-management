@@ -7,7 +7,7 @@ import { Card, Field, useAsync, useToast } from '../lib/ui.jsx';
 const BLANK = {
   name: '', phone: '', aadhar_no: '', address: '', dob_aadhar: '',
   dl_no: '', dl_dob: '', dl_valid_from: '', dl_valid_till: '',
-  bank_account_name: '', bank_account_no: '', bank_ifsc: '', bank_name: '', uan_no: '',
+  bank_account_name: '', bank_account_no: '', bank_ifsc: '', bank_name: '', bank_branch: '', uan_no: '',
   referred_by: '', remarks: '',
 };
 
@@ -398,6 +398,11 @@ export default function DriverRegister() {
             <div className={`field-wrap${flag('bank_name')}`}>
               <Field label="Bank name">
                 <input value={form.bank_name} onChange={set('bank_name')} maxLength={60} />
+              </Field>
+            </div>
+            <div className="field-wrap">
+              <Field label="Bank branch" hint="shown on the HZL pay register">
+                <input value={form.bank_branch} onChange={set('bank_branch')} maxLength={60} />
               </Field>
             </div>
             <div className={`field-wrap${flag('uan_no')}`}>

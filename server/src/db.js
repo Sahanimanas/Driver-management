@@ -36,12 +36,32 @@ function migrateLegacy() {
   addColumn('drivers', 'scan_id TEXT', 'scan_id');
   addColumn('drivers', 'rejection_reason TEXT', 'rejection_reason');
   addColumn('drivers', 'rejected_on TEXT', 'rejected_on');
+  addColumn('drivers', 'bank_branch TEXT', 'bank_branch');
   addColumn('employments', 'salary_structure_id INTEGER', 'salary_structure_id');
   addColumn('payroll_lines', 'salary_structure_id INTEGER', 'salary_structure_id');
   addColumn('payroll_lines', 'structure_code TEXT', 'structure_code');
   addColumn('payroll_lines', 'earnings_json TEXT', 'earnings_json');
   addColumn('payroll_lines', 'deductions_json TEXT', 'deductions_json');
   addColumn('payroll_lines', 'statutory_deduction REAL NOT NULL DEFAULT 0', 'statutory_deduction');
+
+  // --- the client pay registers: component rules, billing, per-driver LSA ---
+  addColumn('salary_components', "rounding TEXT NOT NULL DEFAULT 'none'", 'rounding');
+  addColumn('salary_components', "basis TEXT NOT NULL DEFAULT 'earned'", 'basis');
+  addColumn('salary_components', 'cap REAL NOT NULL DEFAULT 0', 'cap');
+  addColumn('salary_components', 'condition TEXT', 'condition');
+  addColumn('salary_components', 'employer INTEGER NOT NULL DEFAULT 0', 'employer');
+  addColumn('salary_components', 'per_driver INTEGER NOT NULL DEFAULT 0', 'per_driver');
+  addColumn('salary_components', 'is_basic INTEGER NOT NULL DEFAULT 0', 'is_basic');
+  addColumn('salary_structures', 'service_charge REAL NOT NULL DEFAULT 0', 'service_charge');
+  addColumn('salary_structures', 'gst_rate REAL NOT NULL DEFAULT 18', 'gst_rate');
+  addColumn('salary_structures', 'tds_rate REAL NOT NULL DEFAULT 0', 'tds_rate');
+  addColumn('salary_structures', "register_format TEXT NOT NULL DEFAULT 'standard'", 'register_format');
+  addColumn('salary_structures', 'role_label TEXT', 'role_label');
+  addColumn('employments', 'lsa_monthly REAL NOT NULL DEFAULT 0', 'lsa_monthly');
+  addColumn('payroll_lines', 'employer_cost REAL NOT NULL DEFAULT 0', 'employer_cost');
+  addColumn('payroll_lines', 'ctc REAL NOT NULL DEFAULT 0', 'ctc');
+  addColumn('payroll_lines', 'employer_json TEXT', 'employer_json');
+  addColumn('payroll_lines', 'billing_json TEXT', 'billing_json');
 
   // --- users: five roles collapse to three ---------------------------------
   if (columns('users').length && tableSql('users').includes('senior_manager')) {

@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS drivers (
   bank_account_no   TEXT,
   bank_ifsc         TEXT,
   bank_name         TEXT,
+  bank_branch       TEXT,
   uan_no            TEXT,
   referred_by       TEXT,                    -- name of the person who referred the driver
   rejection_reason  TEXT,                    -- captured when the client rejects the driver
@@ -110,6 +111,7 @@ CREATE TABLE IF NOT EXISTS employments (
   location         TEXT,
   monthly_wage     REAL    NOT NULL DEFAULT 0,
   salary_structure_id INTEGER REFERENCES salary_structures(id),
+  lsa_monthly      REAL    NOT NULL DEFAULT 0,  -- loyalty service allowance, set per driver
   status           TEXT    NOT NULL DEFAULT 'active' CHECK (status IN ('active','ended')),
   exit_reason      TEXT,
   created_by       INTEGER REFERENCES users(id),
@@ -266,6 +268,10 @@ CREATE TABLE IF NOT EXISTS payroll_lines (
   earnings_json     TEXT,                       -- component-wise earnings for the wage register
   deductions_json   TEXT,                       -- statutory / structure deductions
   statutory_deduction REAL  NOT NULL DEFAULT 0,
+  employer_cost     REAL    NOT NULL DEFAULT 0,  -- employer PF etc.; not deducted
+  ctc               REAL    NOT NULL DEFAULT 0,  -- gross + employer contributions
+  employer_json     TEXT,
+  billing_json      TEXT,                        -- service charge, GST, invoice, TDS
   gross             REAL    NOT NULL DEFAULT 0,
   advance_deduction REAL    NOT NULL DEFAULT 0,
   other_deduction   REAL    NOT NULL DEFAULT 0,
@@ -345,6 +351,11 @@ CREATE TABLE IF NOT EXISTS salary_structures (
   effective_from TEXT    NOT NULL,
   monthly_gross  REAL    NOT NULL DEFAULT 0,   -- derived from the components
   ot_rate_hour   REAL    NOT NULL DEFAULT 0,
+  service_charge REAL    NOT NULL DEFAULT 0,   -- per driver per month, billed on days present
+  gst_rate       REAL    NOT NULL DEFAULT 18,
+  tds_rate       REAL    NOT NULL DEFAULT 0,
+  register_format TEXT   NOT NULL DEFAULT 'standard', -- 'hzl' | 'surat' | 'standard'
+  role_label     TEXT,                         -- "Drive for" / "Function" on the register
   notes          TEXT,
   active         INTEGER NOT NULL DEFAULT 1,
   created_by     INTEGER REFERENCES users(id),
@@ -363,6 +374,13 @@ CREATE TABLE IF NOT EXISTS salary_components (
   calc          TEXT    NOT NULL DEFAULT 'fixed' CHECK (calc IN ('fixed','percent_of_basic','percent_of_gross')),
   value         REAL    NOT NULL DEFAULT 0,
   prorated      INTEGER NOT NULL DEFAULT 1,    -- scaled by payable days / days in month
+  rounding      TEXT    NOT NULL DEFAULT 'none', -- 'rupee': round like Excel ROUND(x,0)
+  basis         TEXT    NOT NULL DEFAULT 'earned', -- % of basic: this month's or the fixed figure
+  cap           REAL    NOT NULL DEFAULT 0,    -- ceiling on the base a % is taken of (PF: 15000)
+  condition     TEXT,                          -- 'days_gte:30' | 'gross_gt:12000' | 'gross_lte:N'
+  employer      INTEGER NOT NULL DEFAULT 0,    -- company contribution, not deducted from the driver
+  per_driver    INTEGER NOT NULL DEFAULT 0,    -- amount comes from the deployment (LSA)
+  is_basic      INTEGER NOT NULL DEFAULT 0,    -- the basic that PF and % of basic are taken on
   notes         TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_salcomp_structure ON salary_components(structure_id);

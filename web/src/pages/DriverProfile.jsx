@@ -220,6 +220,7 @@ function Overview({ driver, references, employment, onSaved }) {
             <dt>Account number</dt><dd className="mono">{driver.bank_account_no || <span className="chip red">missing</span>}</dd>
             <dt>IFSC</dt><dd className="mono">{driver.bank_ifsc || <span className="chip red">missing</span>}</dd>
             <dt>Bank</dt><dd>{driver.bank_name || '—'}</dd>
+            <dt>Branch</dt><dd>{driver.bank_branch || '—'}</dd>
           </dl>
         </Card>
 
@@ -427,9 +428,11 @@ function DeployModal({ driver, rejoin, onClose, onDone }) {
     location: '',
     salary_structure_id: '',
     monthly_wage: '',
+    lsa_monthly: '',
     bank_account_no: driver.bank_account_no || '',
     bank_ifsc: driver.bank_ifsc || '',
     bank_name: driver.bank_name || '',
+    bank_branch: driver.bank_branch || '',
     uan_no: driver.uan_no || '',
   });
   const [busy, setBusy] = useState(false);
@@ -525,10 +528,16 @@ function DeployModal({ driver, rejoin, onClose, onDone }) {
           </div>
         </div>
       )}
-      <Field label="Monthly wage" hint="overrides the structure for this deployment only">
-        <input type="number" value={form.monthly_wage} onChange={set('monthly_wage')}
-          placeholder={chosen ? String(chosen.monthly_gross) : 'e.g. 20000'} />
-      </Field>
+      <div className="grid c2">
+        <Field label="Monthly wage" hint="overrides the structure for this deployment only">
+          <input type="number" value={form.monthly_wage} onChange={set('monthly_wage')}
+            placeholder={chosen ? String(chosen.monthly_gross) : 'e.g. 20000'} />
+        </Field>
+        <Field label="LSA / month" hint="loyalty allowance for this driver, if any">
+          <input type="number" min={0} value={form.lsa_monthly} onChange={set('lsa_monthly')}
+            placeholder="0" />
+        </Field>
+      </div>
 
       <h4 style={{ margin: '16px 0 8px', fontSize: 13 }}>
         Bank details and UAN
@@ -543,6 +552,9 @@ function DeployModal({ driver, rejoin, onClose, onDone }) {
         </Field>
         <Field label="Bank name">
           <input value={form.bank_name} onChange={set('bank_name')} />
+        </Field>
+        <Field label="Bank branch">
+          <input value={form.bank_branch} onChange={set('bank_branch')} />
         </Field>
         <Field label="UAN number">
           <input value={form.uan_no} onChange={set('uan_no')} />
