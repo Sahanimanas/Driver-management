@@ -28,7 +28,9 @@ function migrateLegacy() {
   const addColumn = (table, decl, col) => {
     if (columns(table).length && !columns(table).includes(col)) {
       db.exec(`ALTER TABLE ${table} ADD COLUMN ${decl}`);
+      return true;
     }
+    return false;
   };
 
   // --- new columns on existing tables --------------------------------------
@@ -37,6 +39,19 @@ function migrateLegacy() {
   addColumn('drivers', 'rejection_reason TEXT', 'rejection_reason');
   addColumn('drivers', 'rejected_on TEXT', 'rejected_on');
   addColumn('drivers', 'bank_branch TEXT', 'bank_branch');
+  addColumn('drivers', 'aadhar_back_doc_id TEXT', 'aadhar_back_doc_id');
+  addColumn('drivers', 'dl_back_doc_id TEXT', 'dl_back_doc_id');
+  addColumn('drivers', 'bank_proof_doc_id TEXT', 'bank_proof_doc_id');
+  addColumn('drivers', 'blacklisted INTEGER NOT NULL DEFAULT 0', 'blacklisted');
+  addColumn('drivers', 'blacklisted_on TEXT', 'blacklisted_on');
+  addColumn('drivers', 'blacklist_reason TEXT', 'blacklist_reason');
+  addColumn('drivers', 'blacklisted_by INTEGER', 'blacklisted_by');
+  addColumn('payroll_lines', 'debit_deduction REAL NOT NULL DEFAULT 0', 'debit_deduction');
+  // Lines paid before this flag existed have already had their recovery
+  // applied; marking them settled stops the next payment run applying it again.
+  if (addColumn('payroll_lines', 'recovery_settled INTEGER NOT NULL DEFAULT 0', 'recovery_settled')) {
+    db.exec("UPDATE payroll_lines SET recovery_settled = 1 WHERE status = 'paid'");
+  }
   addColumn('employments', 'salary_structure_id INTEGER', 'salary_structure_id');
   addColumn('payroll_lines', 'salary_structure_id INTEGER', 'salary_structure_id');
   addColumn('payroll_lines', 'structure_code TEXT', 'structure_code');
@@ -62,6 +77,40 @@ function migrateLegacy() {
   addColumn('payroll_lines', 'ctc REAL NOT NULL DEFAULT 0', 'ctc');
   addColumn('payroll_lines', 'employer_json TEXT', 'employer_json');
   addColumn('payroll_lines', 'billing_json TEXT', 'billing_json');
+
+  // --- challans / debits gain an approval step -----------------------------
+  // Those already on record stay as they are (open ones keep being recovered).
+  if (columns('driver_debits').length && !tableSql('driver_debits').includes('pending_approval')) {
+    db.exec(`
+      ALTER TABLE driver_debits RENAME TO driver_debits_legacy;
+      DROP INDEX IF EXISTS idx_debits_driver;
+      CREATE TABLE driver_debits (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        driver_id     INTEGER NOT NULL REFERENCES drivers(id),
+        employment_id INTEGER REFERENCES employments(id),
+        kind          TEXT    NOT NULL CHECK (kind IN ('challan','debit')),
+        details       TEXT    NOT NULL,
+        debit_date    TEXT    NOT NULL,
+        reason        TEXT    NOT NULL,
+        amount        REAL    NOT NULL CHECK (amount > 0),
+        recovered     REAL    NOT NULL DEFAULT 0,
+        status        TEXT    NOT NULL DEFAULT 'pending_approval'
+                      CHECK (status IN ('pending_approval','open','recovered','rejected','cancelled')),
+        cancel_reason TEXT,
+        approved_by   INTEGER REFERENCES users(id),
+        approved_at   TEXT,
+        approval_remarks TEXT,
+        created_by    INTEGER REFERENCES users(id),
+        created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
+      );
+      INSERT INTO driver_debits (id, driver_id, employment_id, kind, details, debit_date, reason,
+                                 amount, recovered, status, cancel_reason, created_by, created_at)
+        SELECT id, driver_id, employment_id, kind, details, debit_date, reason,
+               amount, recovered, status, cancel_reason, created_by, created_at
+        FROM driver_debits_legacy;
+      DROP TABLE driver_debits_legacy;
+    `);
+  }
 
   // --- users: five roles collapse to three ---------------------------------
   if (columns('users').length && tableSql('users').includes('senior_manager')) {
@@ -126,6 +175,14 @@ try {
 db.exec('PRAGMA foreign_keys = ON');
 
 db.exec(SCHEMA);
+
+// The first time the locations list exists, start it from the sites already
+// in use, so live deployments are on the list the day it is switched on.
+if (!Number(db.prepare('SELECT count(*) AS n FROM locations').get().n)) {
+  db.exec(`INSERT OR IGNORE INTO locations(name)
+           SELECT DISTINCT trim(location) FROM employments
+            WHERE location IS NOT NULL AND trim(location) <> ''`);
+}
 
 /** node:sqlite returns null-prototype rows; normalise so they behave like POJOs. */
 const plain = (row) => (row ? { ...row } : row);

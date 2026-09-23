@@ -46,6 +46,12 @@ router.get(
       inScreening: Number(q.scalar("SELECT count(*) FROM drivers WHERE status IN ('registered','in_screening')")),
       cleared: Number(q.scalar("SELECT count(*) FROM drivers WHERE status = 'cleared'")),
       left: Number(q.scalar("SELECT count(*) FROM drivers WHERE status = 'left'")),
+      // Registered but not deployed -- the pool a supervisor can put forward.
+      notDeployed: Number(q.scalar(
+        `SELECT count(*) FROM drivers d WHERE d.blacklisted = 0 AND d.status <> 'rejected'
+           AND NOT EXISTS (SELECT 1 FROM employments e WHERE e.driver_id = d.id AND e.status = 'active')`,
+      )),
+      blacklisted: Number(q.scalar('SELECT count(*) FROM drivers WHERE blacklisted = 1')),
     };
 
     const attendanceToday = q.all(
@@ -68,6 +74,9 @@ router.get(
         "SELECT count(*) FROM expenses WHERE status = 'pending_approval'",
       )),
       expenses_open: Number(q.scalar("SELECT count(*) FROM expenses WHERE status = 'approved'")),
+      debits_pending_approval: Number(q.scalar(
+        "SELECT count(*) FROM driver_debits WHERE status = 'pending_approval'",
+      )),
     };
 
     const money_ = {

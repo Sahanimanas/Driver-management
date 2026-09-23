@@ -26,8 +26,8 @@ export default function Dashboard() {
       <div className="grid c4" style={{ marginBottom: 16 }}>
         <Stat tone="accent" label="Drivers on roll" value={drivers.total}
           foot={`${drivers.deployed} currently deployed`} />
-        <Stat tone="amber" label="In screening" value={drivers.inScreening}
-          foot={`${drivers.cleared} cleared, awaiting client ID`} />
+        <Stat tone="amber" label="Registered, not deployed" value={drivers.notDeployed}
+          foot={`${drivers.inScreening} in screening · ${drivers.cleared} cleared · ${drivers.blacklisted} blacklisted`} />
         <Stat tone="good" label="Present today" value={attendanceToday.P || 0}
           foot={`of ${totalToday} deployed drivers`} />
         <Stat tone="bad" label="Advance outstanding" value={inr0(money.advance_outstanding)}
@@ -73,6 +73,11 @@ export default function Dashboard() {
                 <td className="num"><b>{approvals.advances_to_pay}</b> <span className="muted small">
                   {inr0(approvals.advances_to_pay_amount)}</span></td>
                 <td className="right"><Link className="btn sm" to="/advances">Pay</Link></td>
+              </tr>
+              <tr>
+                <td>Challans / debits with Admin / Director</td>
+                <td className="num"><b>{approvals.debits_pending_approval ?? 0}</b></td>
+                <td className="right"><Link className="btn sm" to="/advances">Review</Link></td>
               </tr>
               <tr>
                 <td>Expenses with Admin / Director</td>

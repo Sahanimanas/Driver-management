@@ -56,7 +56,7 @@ export default function App() {
         if (!inbox) return 0;
         // Admin / Director sees what is waiting on them to approve; Finance
         // sees what is waiting to be paid; a supervisor sees their own.
-        if (user.role === 'admin') return inbox.pending_approval ?? 0;
+        if (user.role === 'admin') return (inbox.pending_approval ?? 0) + (inbox.debits_pending_approval ?? 0);
         if (user.role === 'finance') return inbox.approved_unpaid ?? inbox.open_settlements ?? 0;
         return inbox.my_requests ?? 0;
       };

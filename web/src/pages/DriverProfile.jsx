@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { Page } from '../App.jsx';
 import { api, fileUrl } from '../lib/api.js';
 import {
@@ -7,6 +7,8 @@ import {
 } from '../lib/ui.jsx';
 import { date, dateTime, inr, inr0, titleCase, today } from '../lib/format.js';
 import StatusChip from '../components/StatusChip.jsx';
+import DeployModal from '../components/DeployModal.jsx';
+import DebitModal from '../components/DebitModal.jsx';
 
 const SCREENINGS = [
   ['trial', 'Trial test'],
@@ -21,13 +23,16 @@ export default function DriverProfile() {
   const [tab, setTab] = useState('overview');
   const [deployOpen, setDeployOpen] = useState(false);
   const [rejectOpen, setRejectOpen] = useState(false);
+  const [blacklistOpen, setBlacklistOpen] = useState(false);
+  const [liftOpen, setLiftOpen] = useState(false);
+  const [params] = useSearchParams();
   const { data, loading, error, reload } = useAsync(() => api.get(`/drivers/${id}`), [id]);
 
   if (loading) return <Page title="Driver"><Loading what="driver" /></Page>;
   if (error) return <Page title="Driver"><ErrorBanner error={error} onRetry={reload} /></Page>;
 
   const { driver, references, screenings, employments, activeEmployment, insurance, longevity,
-    completeness, advances, expenses, attachments } = data;
+    completeness, advances, expenses, attachments, debits, blacklistedBy } = data;
   const passed = SCREENINGS.every(([t]) => screenings.find((s) => s.type === t)?.status === 'passed');
 
   return (
@@ -35,14 +40,20 @@ export default function DriverProfile() {
       title={driver.name}
       subtitle={<span className="mono">{driver.registration_no}</span>}
       actions={<>
-        {can('supervisor') && !activeEmployment && passed && driver.status !== 'rejected' && (
+        {can('supervisor') && !activeEmployment && passed && driver.status !== 'rejected' && !driver.blacklisted && (
           <button className="primary" onClick={() => setDeployOpen(true)}>
             {employments.length ? '+ Rejoin with new ID' : '+ Deploy'}
           </button>
         )}
-        {can('supervisor') && !activeEmployment && driver.status !== 'rejected' && (
+        {can('supervisor') && !activeEmployment && driver.status !== 'rejected' && !driver.blacklisted && (
           <button onClick={() => setRejectOpen(true)}>Client rejected</button>
         )}
+        {can('supervisor') && !activeEmployment && !driver.blacklisted && (
+          <button className="danger" onClick={() => setBlacklistOpen(true)}>Blacklist</button>
+        )}
+        {can('admin') && driver.blacklisted ? (
+          <button onClick={() => setLiftOpen(true)}>Lift blacklist</button>
+        ) : null}
         {can('supervisor') && driver.status === 'rejected' && (
           <button onClick={async () => {
             try {
@@ -55,6 +66,31 @@ export default function DriverProfile() {
         <Link className="btn" to="/drivers">Back to list</Link>
       </>}
     >
+      {params.get('registered') && (
+        <div className="banner success">
+          <span>✓</span>
+          <div>
+            Registered. Registration ID <b className="mono">{driver.registration_no}</b> — quote it
+            for this driver from now on.
+          </div>
+        </div>
+      )}
+
+      {driver.blacklisted ? (
+        <div className="banner error">
+          <span>⛔</span>
+          <div>
+            <b>Blacklisted on {date(driver.blacklisted_on)}{blacklistedBy ? ` by ${blacklistedBy}` : ''}.</b>
+            <div style={{ marginTop: 2 }}>{driver.blacklist_reason}</div>
+            {employments[0]?.date_of_leaving && (
+              <div className="small" style={{ marginTop: 2 }}>
+                Date of leaving: {date(employments[0].date_of_leaving)} (client ID {employments[0].client_id})
+              </div>
+            )}
+          </div>
+        </div>
+      ) : null}
+
       {driver.status === 'rejected' && driver.rejection_reason && (
         <div className="banner error">
           <span>✕</span>
@@ -123,14 +159,40 @@ export default function DriverProfile() {
       {tab === 'ids' && <IdHistory employments={employments} longevity={longevity} onChanged={reload} />}
       {tab === 'documents' && <Documents driver={driver} attachments={attachments} onSaved={reload} />}
       {tab === 'insurance' && <InsuranceTab driverId={driver.id} insurance={insurance} onSaved={reload} />}
-      {tab === 'finance' && <Finance advances={advances} expenses={expenses} />}
+      {tab === 'finance' && (
+        <Finance driver={driver} advances={advances} expenses={expenses} debits={debits} onChanged={reload} />
+      )}
 
       {deployOpen && (
         <DeployModal
-          driver={driver}
-          rejoin={employments.length > 0}
+          driverId={driver.id}
           onClose={() => setDeployOpen(false)}
           onDone={(msg) => { setDeployOpen(false); toast.success(msg); reload(); }}
+        />
+      )}
+
+      {blacklistOpen && (
+        <ReasonModal
+          title={`Blacklist ${driver.name}`}
+          intro="A blacklisted driver cannot be deployed again until Admin / Director lifts the blacklist."
+          label="Reason for blacklisting"
+          action="Blacklist"
+          danger
+          onSubmit={(reason) => api.post(`/drivers/${driver.id}/blacklist`, { reason })}
+          onClose={() => setBlacklistOpen(false)}
+          onDone={() => { setBlacklistOpen(false); toast.success(`${driver.name} is blacklisted`); reload(); }}
+        />
+      )}
+
+      {liftOpen && (
+        <ReasonModal
+          title={`Lift the blacklist on ${driver.name}`}
+          intro={`Blacklisted for: ${driver.blacklist_reason}`}
+          label="Why is the blacklist being lifted?"
+          action="Lift blacklist"
+          onSubmit={(reason) => api.post(`/drivers/${driver.id}/blacklist/lift`, { reason })}
+          onClose={() => setLiftOpen(false)}
+          onDone={() => { setLiftOpen(false); toast.success('Blacklist lifted'); reload(); }}
         />
       )}
 
@@ -155,7 +217,10 @@ function Overview({ driver, references, employment, onSaved }) {
 
   async function save() {
     try {
-      await api.patch(`/drivers/${driver.id}`, form);
+      // The bank name follows the IFSC, so it is not sent when the IFSC changes.
+      const payload = { ...form };
+      if (payload.bank_ifsc !== driver.bank_ifsc) delete payload.bank_name;
+      await api.patch(`/drivers/${driver.id}`, payload);
       toast.success('Driver details updated');
       setEdit(false);
       onSaved();
@@ -190,6 +255,22 @@ function Overview({ driver, references, employment, onSaved }) {
               </Field>
             </div>
             <Field label="Address"><textarea value={form.address || ''} onChange={set('address')} /></Field>
+            <h4 style={{ margin: '12px 0 8px', fontSize: 13 }}>Bank account</h4>
+            <Field label="Account holder name">
+              <input value={form.bank_account_name || ''} onChange={set('bank_account_name')} />
+            </Field>
+            <div className="grid c2">
+              <Field label="Account number">
+                <input value={form.bank_account_no || ''} inputMode="numeric" maxLength={18}
+                  onChange={(e) => setForm((f) => ({ ...f, bank_account_no: e.target.value.replace(/\D/g, '').slice(0, 18) }))} />
+              </Field>
+              <Field label="IFSC code">
+                <input value={form.bank_ifsc || ''} maxLength={11}
+                  onChange={(e) => setForm((f) => ({
+                    ...f, bank_ifsc: e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 11),
+                  }))} />
+              </Field>
+            </div>
           </>
         ) : (
           <dl className="kv">
@@ -246,7 +327,7 @@ function Overview({ driver, references, employment, onSaved }) {
               <dt>Date of joining</dt><dd>{date(employment.date_of_joining)} <span className="muted small">billing starts</span></dd>
               <dt>Vehicle</dt><dd className="mono">{employment.vehicle_number || '—'}</dd>
               <dt>Location</dt><dd>{employment.location || '—'}</dd>
-              <dt>Monthly wage</dt><dd>{inr(employment.monthly_wage)}</dd>
+              <dt>Salary class</dt><dd>{employment.salary_class || '—'}</dd>
             </dl>
           </Card>
         )}
@@ -331,7 +412,7 @@ function IdHistory({ employments, longevity, onChanged }) {
         <table className="tbl">
           <thead>
             <tr><th>Client ID</th><th>Joined</th><th>Left</th><th>Vehicle</th><th>Location</th>
-              <th className="num">Monthly wage</th><th>Status</th><th>Reason</th><th /></tr>
+              <th>Salary class</th><th>Status</th><th>Reason</th><th /></tr>
           </thead>
           <tbody>
             {employments.length === 0 && <Empty>This driver has not been deployed yet.</Empty>}
@@ -342,7 +423,7 @@ function IdHistory({ employments, longevity, onChanged }) {
                 <td>{e.date_of_leaving ? date(e.date_of_leaving) : <span className="muted">—</span>}</td>
                 <td className="mono">{e.vehicle_number || '—'}</td>
                 <td>{e.location || '—'}</td>
-                <td className="num">{inr0(e.monthly_wage)}</td>
+                <td>{e.salary_class || '—'}</td>
                 <td><StatusChip value={e.status} /></td>
                 <td className="muted small">{e.exit_reason || '—'}</td>
                 <td className="right">
@@ -373,13 +454,17 @@ function IdHistory({ employments, longevity, onChanged }) {
 
 function EndModal({ employment, onClose, onDone }) {
   const toast = useToast();
-  const [form, setForm] = useState({ date_of_leaving: today(), exit_reason: '' });
+  const [form, setForm] = useState({
+    date_of_leaving: today(), exit_reason: '', blacklist: false, blacklist_reason: '',
+  });
   const [busy, setBusy] = useState(false);
 
   async function submit() {
     setBusy(true);
     try {
-      const res = await api.post(`/deployments/${employment.id}/end`, form);
+      const payload = { ...form };
+      if (!payload.blacklist) { delete payload.blacklist; delete payload.blacklist_reason; }
+      const res = await api.post(`/deployments/${employment.id}/end`, payload);
       onDone(res.totalService);
     } catch (err) {
       toast.error(err);
@@ -392,7 +477,10 @@ function EndModal({ employment, onClose, onDone }) {
     <Modal title={`End deployment — ID ${employment.client_id}`} onClose={onClose}
       footer={<>
         <button onClick={onClose}>Cancel</button>
-        <button className="danger" onClick={submit} disabled={busy}>End deployment</button>
+        <button className="danger" onClick={submit}
+          disabled={busy || (form.blacklist && form.blacklist_reason.trim().length < 3)}>
+          {form.blacklist ? 'End and blacklist' : 'End deployment'}
+        </button>
       </>}>
       <Field label="Last working day">
         <input type="date" value={form.date_of_leaving}
@@ -408,171 +496,17 @@ function EndModal({ employment, onClose, onDone }) {
           If the driver returns later, deploy them again with the new client ID — their service history
           stays linked to this record.</div>
       </div>
-    </Modal>
-  );
-}
-
-/**
- * Deployment: the client has issued a six digit ID and a date of joining, and
- * the deployment is linked to a salary structure off the master.
- *
- * This is also the last chance to capture the bank details and the UAN — the
- * scope allows those two to be completed here rather than at registration.
- */
-function DeployModal({ driver, rejoin, onClose, onDone }) {
-  const toast = useToast();
-  const [form, setForm] = useState({
-    client_id: '',
-    date_of_joining: today(),
-    vehicle_number: '',
-    location: '',
-    salary_structure_id: '',
-    monthly_wage: '',
-    lsa_monthly: '',
-    bank_account_no: driver.bank_account_no || '',
-    bank_ifsc: driver.bank_ifsc || '',
-    bank_name: driver.bank_name || '',
-    bank_branch: driver.bank_branch || '',
-    uan_no: driver.uan_no || '',
-  });
-  const [busy, setBusy] = useState(false);
-  const [allowMissingBank, setAllowMissingBank] = useState(false);
-  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
-
-  const structures = useAsync(() => api.get('/salary-master?active=true'), []);
-  const rows = structures.data?.rows || [];
-  const chosen = rows.find((r) => String(r.id) === String(form.salary_structure_id));
-
-  const bankIncomplete = !form.bank_account_no.trim() || !form.bank_ifsc.trim();
-  const ready = /^\d{6}$/.test(form.client_id)
-    && form.date_of_joining
-    && (form.salary_structure_id || Number(form.monthly_wage) > 0)
-    && (!bankIncomplete || allowMissingBank);
-
-  async function submit() {
-    setBusy(true);
-    try {
-      const payload = { driver_id: driver.id, ...form };
-      if (!payload.salary_structure_id) delete payload.salary_structure_id;
-      if (!payload.monthly_wage) delete payload.monthly_wage;
-      if (allowMissingBank) payload.allow_missing_bank = true;
-      const res = await api.post('/deployments', payload);
-      onDone(res.message);
-    } catch (err) {
-      toast.error(err);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <Modal
-      wide
-      title={rejoin ? `Rejoin — new client ID for ${driver.name}` : `Deploy ${driver.name}`}
-      onClose={onClose}
-      footer={<>
-        <button onClick={onClose}>Cancel</button>
-        <button className="primary" onClick={submit} disabled={busy || !ready}>
-          {busy ? <span className="spinner" /> : 'Deploy'}
-        </button>
-      </>}
-    >
-      {rejoin && (
-        <div className="banner info">
-          <span>🔗</span>
-          <div>This new ID will be linked to the existing record for {driver.name}, so their earlier
-            service continues to count towards longevity.</div>
-        </div>
-      )}
-
-      <div className="grid c2">
-        <Field label="Client ID" hint="six digits, issued by the client">
-          <input value={form.client_id} onChange={set('client_id')} placeholder="400123" maxLength={6} />
+      <label className="check" style={{ marginBottom: 8 }}>
+        <input type="checkbox" checked={form.blacklist}
+          onChange={(e) => setForm((f) => ({ ...f, blacklist: e.target.checked }))} />
+        Blacklist this driver — do not deploy again
+      </label>
+      {form.blacklist && (
+        <Field label="Reason for blacklisting" required>
+          <textarea value={form.blacklist_reason} style={{ minHeight: 60 }}
+            placeholder="e.g. Absconded with the vehicle; repeated drunk driving"
+            onChange={(e) => setForm((f) => ({ ...f, blacklist_reason: e.target.value }))} />
         </Field>
-        <Field label="Date of joining" hint="billing starts from this date">
-          <input type="date" value={form.date_of_joining} onChange={set('date_of_joining')} />
-        </Field>
-        <Field label="Vehicle number">
-          <input value={form.vehicle_number} onChange={set('vehicle_number')} placeholder="DL01AB1234" />
-        </Field>
-        <Field label="Location">
-          <input value={form.location} onChange={set('location')} placeholder="Site where the driver is placed" />
-        </Field>
-      </div>
-
-      <h4 style={{ margin: '16px 0 8px', fontSize: 13 }}>Salary</h4>
-      <Field label="Salary structure" hint="from the salary master">
-        <select value={form.salary_structure_id} onChange={set('salary_structure_id')}>
-          <option value="">— choose a structure —</option>
-          {rows.map((r) => (
-            <option key={r.id} value={r.id}>
-              {r.name} ({r.code}) — {inr0(r.monthly_gross)}/month
-            </option>
-          ))}
-        </select>
-      </Field>
-      {chosen ? (
-        <div className="banner">
-          <span>₹</span>
-          <div>
-            {chosen.category === 'HZL' ? 'HZL Drivers' : 'Market Drivers'} ·
-            {' '}gross <b>{inr0(chosen.monthly_gross)}</b> a month. Leave the wage below blank to use it.
-          </div>
-        </div>
-      ) : (
-        <div className="banner warn">
-          <span>!</span>
-          <div>
-            Pick a structure, or enter a flat monthly wage. Without one of the two the wage register
-            has nothing to compute from.
-          </div>
-        </div>
-      )}
-      <div className="grid c2">
-        <Field label="Monthly wage" hint="overrides the structure for this deployment only">
-          <input type="number" value={form.monthly_wage} onChange={set('monthly_wage')}
-            placeholder={chosen ? String(chosen.monthly_gross) : 'e.g. 20000'} />
-        </Field>
-        <Field label="LSA / month" hint="loyalty allowance for this driver, if any">
-          <input type="number" min={0} value={form.lsa_monthly} onChange={set('lsa_monthly')}
-            placeholder="0" />
-        </Field>
-      </div>
-
-      <h4 style={{ margin: '16px 0 8px', fontSize: 13 }}>
-        Bank details and UAN
-        <span className="muted small" style={{ fontWeight: 400 }}> — may be completed at this step</span>
-      </h4>
-      <div className="grid c2">
-        <Field label="Account number">
-          <input value={form.bank_account_no} onChange={set('bank_account_no')} />
-        </Field>
-        <Field label="IFSC code">
-          <input value={form.bank_ifsc} onChange={set('bank_ifsc')} placeholder="SBIN0004521" />
-        </Field>
-        <Field label="Bank name">
-          <input value={form.bank_name} onChange={set('bank_name')} />
-        </Field>
-        <Field label="Bank branch">
-          <input value={form.bank_branch} onChange={set('bank_branch')} />
-        </Field>
-        <Field label="UAN number">
-          <input value={form.uan_no} onChange={set('uan_no')} />
-        </Field>
-      </div>
-      {bankIncomplete && (
-        <div className="banner warn">
-          <span>!</span>
-          <div>
-            The account number and IFSC are needed before this driver can be paid an advance or a
-            salary through the bank.
-            <label className="check" style={{ marginTop: 6 }}>
-              <input type="checkbox" checked={allowMissingBank}
-                onChange={(e) => setAllowMissingBank(e.target.checked)} />
-              Deploy now and add the bank details before the first payment run
-            </label>
-          </div>
-        </div>
       )}
     </Modal>
   );
@@ -656,8 +590,11 @@ function Documents({ driver, attachments, onSaved }) {
 
   const slots = [
     ['photo', 'Photograph', driver.photo_id],
-    ['aadhar', 'Aadhar copy', driver.aadhar_doc_id],
-    ['dl', 'Driving licence copy', driver.dl_doc_id],
+    ['aadhar', 'Aadhar — front', driver.aadhar_doc_id],
+    ['aadhar_back', 'Aadhar — back', driver.aadhar_back_doc_id],
+    ['dl', 'Driving licence — front', driver.dl_doc_id],
+    ['dl_back', 'Driving licence — back', driver.dl_back_doc_id],
+    ['bank_proof', 'Cancelled cheque / passbook', driver.bank_proof_doc_id],
   ];
 
   return (
@@ -765,8 +702,63 @@ function InsuranceTab({ driverId, insurance, onSaved }) {
   );
 }
 
-function Finance({ advances, expenses }) {
+function Finance({ driver, advances, expenses, debits, onChanged }) {
+  const { can } = useAuth();
+  const toast = useToast();
+  const [raising, setRaising] = useState(false);
+  const open = debits.filter((x) => x.status === 'open');
+  const awaiting = debits.filter((x) => x.status === 'pending_approval');
   return (
+    <>
+    <Card
+      title="Challans & debits"
+      tight
+      actions={<>
+        {open.length > 0 && (
+          <span className="chip amber">
+            {inr(open.reduce((s, x) => s + x.amount - x.recovered, 0))} to recover from salary
+          </span>
+        )}
+        {awaiting.length > 0 && (
+          <span className="chip grey">{awaiting.length} awaiting approval</span>
+        )}
+        {can('supervisor', 'finance') && (
+          <button className="sm primary" onClick={() => setRaising(true)}>+ Challan / debit</button>
+        )}
+      </>}
+    >
+      <table className="tbl">
+        <thead>
+          <tr><th>Date</th><th>Type</th><th>Details</th><th>Reason</th><th className="num">Amount</th>
+            <th className="num">Recovered</th><th>Status</th></tr>
+        </thead>
+        <tbody>
+          {debits.length === 0 && <Empty>No challans or debits against this driver.</Empty>}
+          {debits.map((x) => (
+            <tr key={x.id}>
+              <td className="nowrap">{date(x.debit_date)}</td>
+              <td><span className={`chip ${x.kind === 'challan' ? 'violet' : 'grey'}`}>
+                {x.kind === 'challan' ? 'Challan' : 'Debit'}</span></td>
+              <td className="small">{x.details}</td>
+              <td className="small">{x.reason}</td>
+              <td className="num">{inr(x.amount)}</td>
+              <td className="num">{x.recovered ? inr(x.recovered) : '—'}</td>
+              <td>
+                <StatusChip value={x.status} />
+                {x.approval_remarks && <div className="muted small">{x.approval_remarks}</div>}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </Card>
+    {raising && (
+      <DebitModal
+        driver={driver}
+        onClose={() => setRaising(false)}
+        onDone={() => { setRaising(false); toast.success('Sent to Admin / Director for approval'); onChanged(); }}
+      />
+    )}
     <div className="grid c2">
       <Card title="Advance requests" tight>
         <table className="tbl">
@@ -803,5 +795,41 @@ function Finance({ advances, expenses }) {
         </table>
       </Card>
     </div>
+    </>
+  );
+}
+
+/** A short form that records a decision with its reason. */
+function ReasonModal({ title, intro, label, action, danger, onSubmit, onClose, onDone }) {
+  const toast = useToast();
+  const [reason, setReason] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  async function submit() {
+    setBusy(true);
+    try {
+      await onSubmit(reason.trim());
+      onDone();
+    } catch (err) {
+      toast.error(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal title={title} onClose={onClose}
+      footer={<>
+        <button onClick={onClose}>Cancel</button>
+        <button className={danger ? 'danger' : 'primary'} onClick={submit}
+          disabled={busy || reason.trim().length < 3}>
+          {busy ? <span className="spinner" /> : action}
+        </button>
+      </>}>
+      {intro && <div className="banner info"><span>ℹ</span><div>{intro}</div></div>}
+      <Field label={label} required>
+        <textarea value={reason} onChange={(e) => setReason(e.target.value)} style={{ minHeight: 80 }} />
+      </Field>
+    </Modal>
   );
 }

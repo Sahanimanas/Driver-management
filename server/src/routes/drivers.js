@@ -31,11 +31,42 @@ const MANDATORY = [
   ['dl_dob', 'Date of birth as per Driving License'],
 ];
 
+// Aadhar and the licence are both captured front and back.
 const MANDATORY_FILES = [
   ['photo', 'Photo'],
-  ['aadhar_doc', 'Copy of Aadhar'],
-  ['dl_doc', 'Copy of Driving License'],
+  ['aadhar_doc', 'Aadhar (front)'],
+  ['aadhar_back_doc', 'Aadhar (back)'],
+  ['dl_doc', 'Driving License (front)'],
+  ['dl_back_doc', 'Driving License (back)'],
 ];
+
+/** Upload field -> [attachment kind, column on the driver row]. */
+const DOC_SLOTS = {
+  photo: ['photo', 'photo_id'],
+  aadhar_doc: ['aadhar', 'aadhar_doc_id'],
+  aadhar_back_doc: ['aadhar_back', 'aadhar_back_doc_id'],
+  dl_doc: ['dl', 'dl_doc_id'],
+  dl_back_doc: ['dl_back', 'dl_back_doc_id'],
+  bank_proof: ['bank_proof', 'bank_proof_doc_id'],
+};
+
+/**
+ * Only the account number, IFSC and holder's name are asked for; the bank's
+ * name is read off the first four letters of the IFSC, which identify it.
+ */
+const IFSC_BANKS = {
+  SBIN: 'State Bank of India', HDFC: 'HDFC Bank', ICIC: 'ICICI Bank', UTIB: 'Axis Bank',
+  PUNB: 'Punjab National Bank', BARB: 'Bank of Baroda', CNRB: 'Canara Bank',
+  UBIN: 'Union Bank of India', BKID: 'Bank of India', IOBA: 'Indian Overseas Bank',
+  IDIB: 'Indian Bank', CBIN: 'Central Bank of India', MAHB: 'Bank of Maharashtra',
+  UCBA: 'UCO Bank', PSIB: 'Punjab & Sind Bank', KKBK: 'Kotak Mahindra Bank',
+  YESB: 'Yes Bank', INDB: 'IndusInd Bank', IDFB: 'IDFC First Bank', FDRL: 'Federal Bank',
+  AIRP: 'Airtel Payments Bank', IPOS: 'India Post Payments Bank', AUBL: 'AU Small Finance Bank',
+  BDBL: 'Bandhan Bank', RATN: 'RBL Bank', KARB: 'Karnataka Bank', SIBL: 'South Indian Bank',
+  JAKA: 'Jammu & Kashmir Bank', ESFB: 'Equitas Small Finance Bank', DBSS: 'DBS Bank India',
+};
+
+export const bankFromIfsc = (ifsc) => IFSC_BANKS[String(ifsc || '').slice(0, 4).toUpperCase()] || null;
 
 /**
  * Everything a driver still owes before they can be put forward for
@@ -47,9 +78,9 @@ export function completeness(driverId) {
   if (!d) return null;
 
   const missing = MANDATORY.filter(([k]) => !d[k]).map(([, label]) => label);
-  if (!d.photo_id) missing.push('Photo');
-  if (!d.aadhar_doc_id) missing.push('Copy of Aadhar');
-  if (!d.dl_doc_id) missing.push('Copy of Driving License');
+  MANDATORY_FILES.forEach(([field, label]) => {
+    if (!d[DOC_SLOTS[field][1]]) missing.push(label);
+  });
 
   const refs = Number(q.scalar('SELECT count(*) FROM driver_references WHERE driver_id = ?', driverId));
   if (refs < 2) missing.push(`Reference contacts (${refs} of 2 recorded)`);
@@ -57,6 +88,7 @@ export function completeness(driverId) {
   // Deferrable to the deployment step, but still needed before the first payout.
   const deferred = [];
   if (!d.bank_account_no || !d.bank_ifsc) deferred.push('Bank Account Details');
+  if (!d.bank_proof_doc_id) deferred.push('Cancelled cheque or passbook');
   if (!d.uan_no) deferred.push('UAN number');
 
   return { complete: missing.length === 0, missing, deferred, referenceCount: refs };
@@ -90,7 +122,9 @@ function driverPayload(body) {
 router.get(
   '/',
   h(async (req, res) => {
-    const { search = '', status = '', location = '', deployed = '', limit = 100, offset = 0 } = req.query;
+    const {
+      search = '', status = '', location = '', deployed = '', blacklisted = '', limit = 100, offset = 0,
+    } = req.query;
     const where = [];
     const params = [];
 
@@ -109,14 +143,19 @@ router.get(
       params.push(location);
     }
     if (deployed === 'true') where.push('e.id IS NOT NULL');
-    if (deployed === 'false') where.push('e.id IS NULL');
+    // Registered but not deployed: everyone without a live deployment who could
+    // still be put forward -- not the blacklisted, not the client-rejected.
+    if (deployed === 'false') where.push("e.id IS NULL AND d.blacklisted = 0 AND d.status <> 'rejected'");
+    if (blacklisted === 'true') where.push('d.blacklisted = 1');
 
     const sql = `
       SELECT d.id, d.registration_no, d.name, d.phone, d.status, d.photo_id, d.dl_valid_till,
+             d.blacklisted, d.blacklisted_on,
              e.id AS employment_id, e.client_id, e.date_of_joining, e.vehicle_number, e.location,
-             e.monthly_wage
+             s.name AS salary_class
       FROM drivers d
       LEFT JOIN employments e ON e.driver_id = d.id AND e.status = 'active'
+      LEFT JOIN salary_structures s ON s.id = e.salary_structure_id
       ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
       ORDER BY d.created_at DESC
       LIMIT ? OFFSET ?`;
@@ -148,7 +187,9 @@ router.get(
     if (!driver) throw notFound('Driver not found');
 
     const employments = q.all(
-      'SELECT * FROM employments WHERE driver_id = ? ORDER BY date_of_joining DESC',
+      `SELECT e.*, s.name AS salary_class, s.code AS salary_class_code
+         FROM employments e LEFT JOIN salary_structures s ON s.id = e.salary_structure_id
+        WHERE e.driver_id = ? ORDER BY e.date_of_joining DESC`,
       id,
     );
     res.json({
@@ -170,6 +211,15 @@ router.get(
         'SELECT * FROM expenses WHERE driver_id = ? ORDER BY requested_at DESC LIMIT 25',
         id,
       ),
+      debits: q.all(
+        `SELECT x.*, u.name AS created_by_name FROM driver_debits x
+         LEFT JOIN users u ON u.id = x.created_by
+         WHERE x.driver_id = ? ORDER BY x.debit_date DESC, x.id DESC LIMIT 50`,
+        id,
+      ),
+      blacklistedBy: driver.blacklisted_by
+        ? q.get('SELECT name FROM users WHERE id = ?', driver.blacklisted_by)?.name || null
+        : null,
       attachments: q.all(
         "SELECT id, kind, filename, mime, uploaded_at FROM attachments WHERE owner_type = 'driver' AND owner_id = ?",
         String(id),
@@ -179,11 +229,7 @@ router.get(
 );
 
 // ------------------------------------------------------------- registration
-const REG_FILES = upload.fields([
-  { name: 'photo', maxCount: 1 },
-  { name: 'aadhar_doc', maxCount: 1 },
-  { name: 'dl_doc', maxCount: 1 },
-]);
+const REG_FILES = upload.fields(Object.keys(DOC_SLOTS).map((name) => ({ name, maxCount: 1 })));
 
 router.post(
   '/',
@@ -221,6 +267,9 @@ router.post(
     if (!validAadhar(p.aadhar_no)) throw bad('Aadhar number must be 12 digits');
     if (p.dob_aadhar && !isDate(p.dob_aadhar)) throw bad('Date of birth must be YYYY-MM-DD');
     if (p.dl_valid_till && !isDate(p.dl_valid_till)) throw bad('DL validity must be YYYY-MM-DD');
+    if (p.bank_ifsc && !/^[A-Z]{4}0[A-Z0-9]{6}$/.test(String(p.bank_ifsc).toUpperCase().trim())) {
+      throw bad('IFSC code must be 11 characters, e.g. SBIN0004521');
+    }
 
     // The scope requires the Aadhar DOB to match the DOB on the driving licence.
     if (p.dob_aadhar && p.dl_dob && p.dob_aadhar !== p.dl_dob && !p.dob_mismatch_ack) {
@@ -228,6 +277,20 @@ router.post(
         `Date of birth on Aadhar (${p.dob_aadhar}) does not match the driving licence (${p.dl_dob}). ` +
           'Correct the details, or resubmit with dob_mismatch_ack to record the exception.',
         { code: 'DOB_MISMATCH' },
+      );
+    }
+
+    // Both sides of the Aadhar and the licence are never optional, even on an
+    // incomplete registration. A single PDF holding both sides is uploaded to
+    // each of the two fields.
+    const sidesMissing = MANDATORY_FILES
+      .filter(([field]) => field !== 'photo' && !files[field]?.[0])
+      .map(([, label]) => label);
+    if (sidesMissing.length) {
+      throw bad(
+        `Upload both sides of the Aadhar and the Driving License — missing: ${sidesMissing.join(', ')}. `
+          + 'An image or a PDF is accepted for each side; if one PDF holds both sides, attach it to both fields.',
+        { code: 'DOCUMENT_SIDES_REQUIRED', missing: sidesMissing },
       );
     }
 
@@ -261,8 +324,8 @@ router.post(
         p.dl_valid_till || null,
         p.bank_account_name || p.name.trim(),
         p.bank_account_no ? digits(p.bank_account_no) : null,
-        p.bank_ifsc ? String(p.bank_ifsc).toUpperCase() : null,
-        p.bank_name || null,
+        p.bank_ifsc ? String(p.bank_ifsc).toUpperCase().trim() : null,
+        p.bank_name || bankFromIfsc(p.bank_ifsc),
         p.bank_branch ? String(p.bank_branch).trim() : null,
         p.uan_no ? digits(p.uan_no) : null,
         p.referred_by ? String(p.referred_by).trim() : null,
@@ -275,17 +338,14 @@ router.post(
         req.user.id,
       );
 
-      const attach = (field, kind, column) => {
+      Object.entries(DOC_SLOTS).forEach(([field, [kind, column]]) => {
         const f = files[field]?.[0];
         if (!f) return;
         const attId = saveAttachment(f, {
           ownerType: 'driver', ownerId: id, kind, userId: req.user.id,
         });
         q.run(`UPDATE drivers SET ${column} = ? WHERE id = ?`, attId, id);
-      };
-      attach('photo', 'photo', 'photo_id');
-      attach('aadhar_doc', 'aadhar', 'aadhar_doc_id');
-      attach('dl_doc', 'dl', 'dl_doc_id');
+      });
 
       refsIn.slice(0, 4).forEach((r) => {
         q.run(
@@ -336,6 +396,16 @@ router.patch(
     });
     if (!Object.keys(patch).length) throw bad('Nothing to update');
     if (patch.phone && !validPhone(patch.phone)) throw bad('Phone number must be a valid 10 digit mobile number');
+    if (patch.bank_ifsc) {
+      patch.bank_ifsc = String(patch.bank_ifsc).toUpperCase().trim();
+      if (!/^[A-Z]{4}0[A-Z0-9]{6}$/.test(patch.bank_ifsc)) {
+        throw bad('IFSC code must be 11 characters, e.g. SBIN0004521');
+      }
+      if (patch.bank_name === undefined && bankFromIfsc(patch.bank_ifsc)) {
+        patch.bank_name = bankFromIfsc(patch.bank_ifsc);
+      }
+    }
+    if (patch.bank_account_no) patch.bank_account_no = digits(patch.bank_account_no);
 
     const merged = { ...driver, ...patch };
     if (merged.dob_aadhar && merged.dl_dob && merged.dob_aadhar !== merged.dl_dob && !req.body.dob_mismatch_ack) {
@@ -387,10 +457,11 @@ router.post(
     const driver = q.get('SELECT * FROM drivers WHERE id = ?', id);
     if (!driver) throw notFound('Driver not found');
     if (!req.file) throw bad('No file uploaded');
-    const kind = oneOf(req.body.kind || 'other', ['photo', 'aadhar', 'dl', 'other'], 'kind');
+    const columns = Object.fromEntries(Object.values(DOC_SLOTS));
+    const kind = oneOf(req.body.kind || 'other', [...Object.keys(columns), 'other'], 'kind');
 
     const attId = saveAttachment(req.file, { ownerType: 'driver', ownerId: id, kind, userId: req.user.id });
-    const column = { photo: 'photo_id', aadhar: 'aadhar_doc_id', dl: 'dl_doc_id' }[kind];
+    const column = columns[kind];
     if (column) {
       const previous = driver[column];
       q.run(`UPDATE drivers SET ${column} = ? WHERE id = ?`, attId, id);
@@ -449,6 +520,68 @@ router.post(
     });
   }),
 );
+
+// --------------------------------------------------------------- blacklist
+/**
+ * Blacklist a driver who has left, or who was never deployed. A deployed
+ * driver is blacklisted by ending the deployment with the blacklist option, so
+ * that the date of leaving is recorded in the attendance sheet first.
+ */
+router.post(
+  '/:id/blacklist',
+  allow('supervisor'),
+  h(async (req, res) => {
+    const id = Number(req.params.id);
+    const driver = q.get('SELECT * FROM drivers WHERE id = ?', id);
+    if (!driver) throw notFound('Driver not found');
+    if (driver.blacklisted) throw bad('This driver is already blacklisted');
+    const reason = String(req.body.reason || '').trim();
+    if (reason.length < 3) throw bad('Record the reason for blacklisting the driver');
+    const open = q.get("SELECT client_id FROM employments WHERE driver_id = ? AND status = 'active'", id);
+    if (open) {
+      throw bad(
+        `This driver is deployed under client ID ${open.client_id}. End the deployment and tick `
+          + 'the blacklist option there, so the date of leaving is recorded in attendance.',
+        { code: 'STILL_DEPLOYED' },
+      );
+    }
+    blacklist(id, reason, req.user.id);
+    res.json(q.get('SELECT * FROM drivers WHERE id = ?', id));
+  }),
+);
+
+/** Lifting a blacklist is a management decision. */
+router.post(
+  '/:id/blacklist/lift',
+  allow('admin'),
+  h(async (req, res) => {
+    const id = Number(req.params.id);
+    const driver = q.get('SELECT * FROM drivers WHERE id = ?', id);
+    if (!driver) throw notFound('Driver not found');
+    if (!driver.blacklisted) throw bad('This driver is not blacklisted');
+    const reason = String(req.body.reason || '').trim();
+    if (reason.length < 3) throw bad('Record why the blacklist is being lifted');
+    q.run(
+      `UPDATE drivers SET blacklisted = 0, blacklisted_on = NULL, blacklist_reason = NULL,
+              blacklisted_by = NULL, updated_at = datetime('now') WHERE id = ?`,
+      id,
+    );
+    audit(req.user.id, 'driver', id, 'blacklist_lifted', {
+      reason, previousReason: driver.blacklist_reason, blacklistedOn: driver.blacklisted_on,
+    });
+    res.json(q.get('SELECT * FROM drivers WHERE id = ?', id));
+  }),
+);
+
+/** Shared with ending a deployment, which can blacklist in the same step. */
+export function blacklist(driverId, reason, userId, on = today()) {
+  q.run(
+    `UPDATE drivers SET blacklisted = 1, blacklisted_on = ?, blacklist_reason = ?, blacklisted_by = ?,
+            updated_at = datetime('now') WHERE id = ?`,
+    on, reason, userId, driverId,
+  );
+  audit(userId, 'driver', driverId, 'blacklisted', { reason, on });
+}
 
 // --------------------------------------------- scan the registration page
 /** Which engines are available, so the form can say what it is about to do. */

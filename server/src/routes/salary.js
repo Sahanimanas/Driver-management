@@ -5,6 +5,7 @@ import { authenticate, allow } from '../auth.js';
 import { config } from '../config.js';
 import { upload, saveBuffer } from '../files.js';
 import { buildWorkbook, readWorkbook, XLSX_MIME } from '../excel.js';
+import { buildHdfcFile } from '../hdfc.js';
 import { loadStructure, computeSalary, CATEGORY_LABEL } from './salary-master.js';
 import { flatStructure } from '../payroll/engine.js';
 import { buildPayRegister, registerLine } from '../payroll/register.js';
@@ -70,7 +71,8 @@ router.get(
 
 /**
  * Collate the month: build (or rebuild) a payroll line per deployment from the
- * attendance on record. Outstanding paid advances are pulled in as deductions.
+ * attendance on record. Outstanding paid advances are pulled in as deductions,
+ * then open challans / debits out of whatever pay is left.
  */
 router.post(
   '/periods/:period/collate',
@@ -137,15 +139,27 @@ router.post(
         const advanceDeduction = existing && row.status !== 'draft'
           ? existing.advance_deduction
           : money(Math.min(outstanding, payable));
-        const netPayable = money(payable - advanceDeduction - otherDeduction);
+
+        // Challans and debits come off after advances; what this month cannot
+        // cover stays open and is taken next month.
+        const openDebits = Number(q.scalar(
+          `SELECT COALESCE(sum(amount - recovered), 0) FROM driver_debits
+           WHERE driver_id = ? AND status = 'open' AND debit_date <= ?`,
+          emp.driver_id, days[days.length - 1],
+        ));
+        const debitDeduction = existing && row.status !== 'draft'
+          ? existing.debit_deduction
+          : money(Math.max(0, Math.min(openDebits, payable - advanceDeduction - otherDeduction)));
+        const netPayable = money(payable - advanceDeduction - debitDeduction - otherDeduction);
 
         q.run(
           `INSERT INTO payroll_lines
              (period_id, employment_id, days_in_period, present_days, training_days, transit_days,
               leave_days, left_days, payable_days, rate_per_day, salary_structure_id, structure_code,
               earnings_json, deductions_json, statutory_deduction, employer_cost, ctc,
-              employer_json, billing_json, gross, advance_deduction, other_deduction, net_payable)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+              employer_json, billing_json, gross, advance_deduction, debit_deduction, other_deduction,
+              net_payable)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(period_id, employment_id) DO UPDATE SET
              days_in_period = excluded.days_in_period, present_days = excluded.present_days,
              training_days = excluded.training_days, transit_days = excluded.transit_days,
@@ -158,13 +172,15 @@ router.post(
              employer_cost = excluded.employer_cost, ctc = excluded.ctc,
              employer_json = excluded.employer_json, billing_json = excluded.billing_json,
              gross = excluded.gross, advance_deduction = excluded.advance_deduction,
+             debit_deduction = excluded.debit_deduction,
              net_payable = excluded.gross - excluded.statutory_deduction
-                           - excluded.advance_deduction - payroll_lines.other_deduction
+                           - excluded.advance_deduction - excluded.debit_deduction
+                           - payroll_lines.other_deduction
            WHERE payroll_lines.status IN ('pending','held')`,
           row.id, emp.id, t.applicable, t.counts.P, t.counts.T, t.counts.TA, t.counts.L, t.counts.LE,
           t.payableDays, rate, structure?.id || null, structure?.code || null,
           earningsJson, deductionsJson, statutory, employerCost, ctc, employerJson, billingJson,
-          g, advanceDeduction, otherDeduction, netPayable,
+          g, advanceDeduction, debitDeduction, otherDeduction, netPayable,
         );
         gross += g;
         net += netPayable;
@@ -211,13 +227,14 @@ router.get(
         count: t.count + 1,
         gross: money(t.gross + r.gross),
         advance: money(t.advance + r.advance_deduction),
+        debit: money(t.debit + r.debit_deduction),
         other: money(t.other + r.other_deduction),
         net: money(t.net + (r.hold ? 0 : r.net_payable)),
         held: t.held + (r.hold ? 1 : 0),
         heldAmount: money(t.heldAmount + (r.hold ? r.net_payable : 0)),
         paid: t.paid + (r.status === 'paid' ? 1 : 0),
       }),
-      { count: 0, gross: 0, advance: 0, other: 0, net: 0, held: 0, heldAmount: 0, paid: 0 },
+      { count: 0, gross: 0, advance: 0, debit: 0, other: 0, net: 0, held: 0, heldAmount: 0, paid: 0 },
     );
 
     return res.json({ period: row, rows, totals });
@@ -264,6 +281,9 @@ router.patch(
     if (req.body.advance_deduction !== undefined) {
       patch.advance_deduction = money(num(req.body.advance_deduction, 'advance_deduction', { min: 0 }));
     }
+    if (req.body.debit_deduction !== undefined) {
+      patch.debit_deduction = money(num(req.body.debit_deduction, 'debit_deduction', { min: 0 }));
+    }
     if (req.body.other_deduction !== undefined) {
       patch.other_deduction = money(num(req.body.other_deduction, 'other_deduction', { min: 0 }));
     }
@@ -302,7 +322,8 @@ router.patch(
       patch.statutory_deduction = 0;
     }
     patch.net_payable = money(
-      patch.gross - patch.statutory_deduction - merged.advance_deduction - merged.other_deduction,
+      patch.gross - patch.statutory_deduction - merged.advance_deduction
+        - merged.debit_deduction - merged.other_deduction,
     );
     if (patch.net_payable < 0) throw bad('Deductions exceed the gross amount for this driver');
 
@@ -426,6 +447,7 @@ router.get(
         { header: 'Gross (INR)', key: 'gross', width: 14, numFmt: '#,##0.00' },
         { header: 'Statutory Deduction', key: 'statutory_deduction', width: 17, numFmt: '#,##0.00' },
         { header: 'Advance Recovery', key: 'advance_deduction', width: 16, numFmt: '#,##0.00' },
+        { header: 'Challan / Debit Recovery', key: 'debit_deduction', width: 16, numFmt: '#,##0.00' },
         { header: 'Other Deduction', key: 'other_deduction', width: 15, numFmt: '#,##0.00' },
         { header: 'Net Payable', key: 'net_payable', width: 14, numFmt: '#,##0.00' },
         { header: 'Hold', key: 'hold_label', width: 8 },
@@ -458,8 +480,9 @@ router.get(
 );
 
 /**
- * HDFC e-Net bulk payment sheet. Held lines and lines with no bank details are
- * excluded, and the excluded list is returned in the response header count.
+ * HDFC bulk payment upload for the month's salary, in the same ENet layout as
+ * the day's advances. Held lines and lines with no bank details are excluded,
+ * and the excluded count is returned in a response header.
  */
 router.get(
   '/periods/:period/enet-sheet',
@@ -471,7 +494,7 @@ router.get(
 
     const rows = q.all(
       `SELECT l.*, d.name, d.bank_account_no, d.bank_ifsc, d.bank_account_name, d.registration_no,
-              e.client_id FROM payroll_lines l
+              d.bank_name, d.bank_branch, e.client_id FROM payroll_lines l
        JOIN employments e ON e.id = l.employment_id JOIN drivers d ON d.id = e.driver_id
        WHERE l.period_id = ? AND l.hold = 0 AND l.status <> 'paid' AND l.net_payable > 0
        ORDER BY d.name`,
@@ -480,39 +503,19 @@ router.get(
     const payable = rows.filter((r) => r.bank_account_no && r.bank_ifsc);
     const missing = rows.filter((r) => !r.bank_account_no || !r.bank_ifsc);
 
-    const buf = await buildWorkbook({
-      sheetName: 'ENET',
-      columns: [
-        { header: 'Payment Type', key: 'ptype', width: 14 },
-        { header: 'Beneficiary Name', key: 'beneficiary', width: 28 },
-        { header: 'Beneficiary Account Number', key: 'account', width: 24 },
-        { header: 'IFSC', key: 'ifsc', width: 14 },
-        { header: 'Amount', key: 'amount', width: 13, numFmt: '#,##0.00' },
-        { header: 'Debit Account No', key: 'debit', width: 20 },
-        { header: 'Payment Date', key: 'pdate', width: 14 },
-        { header: 'Narration', key: 'narration', width: 30 },
-        { header: 'Email', key: 'email', width: 20 },
-        { header: 'Reference', key: 'reference', width: 18 },
-      ],
-      rows: payable.map((r) => ({
-        ptype: r.net_payable >= 200000 ? 'RTGS' : 'NEFT',
-        beneficiary: r.bank_account_name || r.name,
-        account: r.bank_account_no,
-        ifsc: r.bank_ifsc,
-        amount: r.net_payable,
-        debit: req.query.debit_account || 'DEBIT_ACCOUNT',
-        pdate: req.query.payment_date || today(),
-        narration: `SALARY ${period} ${r.client_id || r.registration_no}`.slice(0, 30),
-        email: '',
-        reference: `SAL-${period}-${r.employment_id}`,
-      })),
-      notes: missing.length
-        ? [`Excluded ${missing.length} driver(s) with incomplete bank details: ${missing.map((m) => m.name).join(', ')}`]
-        : [],
-    });
+    const format = req.query.format === 'csv' ? 'csv' : 'xlsx';
+    const file = await buildHdfcFile(payable.map((r) => ({
+      name: r.bank_account_name || r.name,
+      employeeId: r.client_id,
+      account: r.bank_account_no,
+      ifsc: r.bank_ifsc,
+      amount: r.net_payable,
+    })), { date: req.query.payment_date || today(), format });
+    const buf = file.buffer;
+    const filename = `hdfc-salary-${period}.${file.ext}`;
 
     saveBuffer(buf, {
-      filename: `hdfc-enet-${period}.xlsx`, mime: XLSX_MIME,
+      filename, mime: file.mime,
       ownerType: 'payroll', ownerId: row.id, kind: 'register', userId: req.user.id,
     });
     if (payable.length) {
@@ -523,9 +526,11 @@ router.get(
       audit(req.user.id, 'payroll', period, 'enet_sheet_generated', { count: payable.length });
     }
 
-    res.setHeader('Content-Type', XLSX_MIME);
+    res.setHeader('Content-Type', file.mime);
     res.setHeader('X-Excluded-Count', String(missing.length));
-    res.setHeader('Content-Disposition', `attachment; filename="hdfc-enet-${period}.xlsx"`);
+    res.setHeader('X-Excluded-Names', encodeURIComponent(missing.map((m) => m.name).join(', ')));
+    res.setHeader('Access-Control-Expose-Headers', 'X-Excluded-Count, X-Excluded-Names');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.send(buf);
   }),
 );
@@ -562,7 +567,7 @@ router.post(
         );
         applied.push({ line_id: line.id, amount });
       });
-      settleAdvancesFor(row.id);
+      settleRecoveriesFor(row.id);
       const remaining = Number(q.scalar(
         "SELECT count(*) FROM payroll_lines WHERE period_id = ? AND hold = 0 AND status <> 'paid'", row.id,
       ));
@@ -574,26 +579,51 @@ router.post(
   }),
 );
 
-/** Once salary is paid, mark the recovered portion against the driver's advances. */
-function settleAdvancesFor(periodId) {
+/**
+ * Once salary is paid, apply what it recovered: the advance deduction against
+ * the driver's advances and the challan / debit deduction against their
+ * debits, oldest first. Each line is settled exactly once -- payments are often
+ * recorded in more than one go, and without the flag a second run would
+ * recover the first run's lines all over again.
+ */
+function settleRecoveriesFor(periodId) {
   const lines = q.all(
     `SELECT l.*, e.driver_id FROM payroll_lines l JOIN employments e ON e.id = l.employment_id
-     WHERE l.period_id = ? AND l.status = 'paid' AND l.advance_deduction > 0`,
+     WHERE l.period_id = ? AND l.status = 'paid' AND l.recovery_settled = 0`,
     periodId,
   );
   lines.forEach((line) => {
     let left = line.advance_deduction;
-    const open = q.all(
+    const openAdvances = q.all(
       `SELECT * FROM advances WHERE driver_id = ? AND status = 'paid' AND recovered < amount
-       ORDER BY request_date`,
+       ORDER BY request_date, id`,
       line.driver_id,
     );
-    open.forEach((adv) => {
+    openAdvances.forEach((adv) => {
       if (left <= 0) return;
       const take = Math.min(left, adv.amount - adv.recovered);
       q.run('UPDATE advances SET recovered = recovered + ? WHERE id = ?', money(take), adv.id);
       left = money(left - take);
     });
+
+    let debitLeft = line.debit_deduction || 0;
+    const openDebits = q.all(
+      `SELECT * FROM driver_debits WHERE driver_id = ? AND status = 'open' AND recovered < amount
+       ORDER BY debit_date, id`,
+      line.driver_id,
+    );
+    openDebits.forEach((x) => {
+      if (debitLeft <= 0) return;
+      const take = money(Math.min(debitLeft, x.amount - x.recovered));
+      const recovered = money(x.recovered + take);
+      q.run(
+        'UPDATE driver_debits SET recovered = ?, status = ? WHERE id = ?',
+        recovered, recovered >= x.amount ? 'recovered' : 'open', x.id,
+      );
+      debitLeft = money(debitLeft - take);
+    });
+
+    q.run('UPDATE payroll_lines SET recovery_settled = 1 WHERE id = ?', line.id);
   });
 }
 
@@ -661,7 +691,7 @@ router.post(
         );
         matched.push({ line_id: line.id, driver: line.name, amount: amount || line.net_payable, utr });
       });
-      settleAdvancesFor(row.id);
+      settleRecoveriesFor(row.id);
       const remaining = Number(q.scalar(
         "SELECT count(*) FROM payroll_lines WHERE period_id = ? AND hold = 0 AND status <> 'paid'", row.id,
       ));

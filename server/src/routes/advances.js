@@ -4,6 +4,7 @@ import { authenticate, allow, is } from '../auth.js';
 import { config } from '../config.js';
 import { saveBuffer } from '../files.js';
 import { buildWorkbook, XLSX_MIME } from '../excel.js';
+import { buildHdfcFile } from '../hdfc.js';
 import {
   h, need, bad, notFound, forbidden, isDate, today, money, num, cutoffFor,
   periodDays, daysInPeriod,
@@ -125,12 +126,34 @@ export function approvalContext(driverId, onDate = today(), excludeId = null) {
     driverId, excludeId, excludeId,
   ).map((r) => ({ ...r, outstanding: money(r.amount - r.recovered) }));
 
+  /**
+   * The ceiling: a month's advances may not exceed half (by default) of what
+   * the driver has earned on the attendance so far. What counts against it is
+   * money approved or already paid -- a request still awaiting a decision has
+   * not been granted, and is checked against the ceiling when it is decided.
+   */
+  const limitPercent = config.rules.advanceLimitPercent;
+  const advanceLimit = money((accrued.accruedSalary * limitPercent) / 100);
+  const grantedThisMonth = money(approvedThisMonth + paidThisMonth);
+  const eligible = money(Math.max(0, advanceLimit - grantedThisMonth));
+
+  // Challans and debits still to be recovered come off the same salary.
+  const openDebits = money(Number(q.scalar(
+    "SELECT COALESCE(sum(amount - recovered), 0) FROM driver_debits WHERE driver_id = ? AND status = 'open'",
+    driverId,
+  )));
+
   return {
     period,
     asOn: onDate,
     advancesThisMonth,
     outstanding,
     ...accrued,
+    limitPercent,
+    advanceLimit,
+    grantedThisMonth,
+    eligible,
+    openDebits,
     // What is left of this month's earnings once advances are taken off.
     // What is left of this month's earnings before this request is counted.
     headroom: money(accrued.accruedSalary - advancesThisMonth),
@@ -201,6 +224,10 @@ router.get('/inbox', h(async (req, res) => {
       "SELECT count(*) FROM advances WHERE status = 'pending_approval'",
     )),
     approved_unpaid: Number(q.scalar("SELECT count(*) FROM advances WHERE status = 'approved'")),
+    // Challans / debits share the advances page, so their approvals count here too.
+    debits_pending_approval: Number(q.scalar(
+      "SELECT count(*) FROM driver_debits WHERE status = 'pending_approval'",
+    )),
     my_requests: Number(q.scalar(
       "SELECT count(*) FROM advances WHERE requested_by = ? AND status = 'pending_approval'",
       req.user.id,
@@ -275,6 +302,19 @@ router.post(
       if (amount !== adv.amount) {
         const note = `Approved at ${amount} against ${adv.amount} requested`;
         remarks = remarks ? `${remarks} — ${note}` : note;
+      }
+    }
+
+    // No approval may take the month's advances past the ceiling.
+    if (approve) {
+      const ctx = approvalContext(adv.driver_id, adv.request_date, adv.id);
+      if (amount > ctx.eligible) {
+        throw bad(
+          `This would take ${ctx.period} advances past ${ctx.limitPercent}% of the salary earned on `
+            + `attendance (${ctx.payableDays} day(s), limit ${ctx.advanceLimit}). Already granted this `
+            + `month: ${ctx.grantedThisMonth}. The most that can be approved is ${ctx.eligible}.`,
+          { code: 'ADVANCE_LIMIT', eligible: ctx.eligible, limit: ctx.advanceLimit },
+        );
       }
     }
 
@@ -381,6 +421,62 @@ router.get(
   }),
 );
 
+/**
+ * "The advance of the day should be converted into a sheet which can be
+ * uploaded in HDFC bulk payment."
+ *
+ * Every approved advance waiting to be paid, up to and including the given
+ * date, goes into one payment run and one HDFC upload file. Drivers without
+ * complete bank details cannot go through the bank, so they are left out and
+ * named in the response rather than holding up everybody else.
+ */
+router.post(
+  '/day-sheet',
+  allow('finance'),
+  h(async (req, res) => {
+    const date = req.body.date || today();
+    if (!isDate(date)) throw bad('date must be YYYY-MM-DD');
+
+    const rows = q.all(
+      `${SELECT} WHERE a.status = 'approved' AND a.batch_id IS NULL AND a.request_date <= ?
+       ORDER BY a.request_date, a.id`,
+      date,
+    );
+    const ready = rows.filter((r) => r.bank_account_no && r.bank_ifsc);
+    const skipped = rows.filter((r) => !r.bank_account_no || !r.bank_ifsc)
+      .map((r) => ({ id: r.id, driver: r.driver_name, amount: r.amount }));
+    if (!ready.length) {
+      throw bad(
+        rows.length
+          ? 'None of the approved advances can be paid through the bank — bank details are missing for all of them.'
+          : `There are no approved advances waiting to be paid up to ${date}.`,
+        { code: 'NOTHING_TO_PAY', skipped },
+      );
+    }
+
+    const total = money(ready.reduce((s, r) => s + r.amount, 0));
+    const batchId = tx(() => {
+      const id = q.insert(
+        `INSERT INTO payment_batches(kind, batch_date, cutoff, method, item_count, total_amount, created_by)
+         VALUES ('advance', ?, ?, 'sheet', ?, ?, ?)`,
+        date, cutoffFor(), ready.length, total, req.user.id,
+      );
+      ready.forEach((r) => q.run('UPDATE advances SET batch_id = ? WHERE id = ?', id, r.id));
+      audit(req.user.id, 'payment_batch', id, 'created', {
+        kind: 'advance', method: 'sheet', total, daySheet: date, skipped: skipped.length,
+      });
+      return id;
+    });
+
+    res.status(201).json({
+      batch: q.get('SELECT * FROM payment_batches WHERE id = ?', batchId),
+      count: ready.length,
+      total,
+      skipped,
+    });
+  }),
+);
+
 /** Create a payment run from a set of approved requests. */
 router.post(
   '/batches',
@@ -460,7 +556,7 @@ router.get(
   }),
 );
 
-/** Bank upload sheet for a "sheet" batch (>4 requests). */
+/** HDFC bulk upload file for a payment run. ?format=csv for the headerless file. */
 router.get(
   '/batches/:id/sheet',
   allow('finance'),
@@ -469,39 +565,23 @@ router.get(
     if (!batch) throw notFound('Payment run not found');
     const items = q.all(`${SELECT} WHERE a.batch_id = ?`, batch.id);
 
-    const buf = await buildWorkbook({
-      sheetName: 'Bank Upload',
-      title: `Advance Payment Upload — ${batch.batch_date} (${batch.cutoff})`,
-      columns: [
-        { header: 'Beneficiary Name', key: 'beneficiary', width: 28 },
-        { header: 'Account Number', key: 'account', width: 22 },
-        { header: 'IFSC', key: 'ifsc', width: 14 },
-        { header: 'Amount', key: 'amount', width: 12, numFmt: '#,##0.00' },
-        { header: 'Payment Mode', key: 'mode', width: 14 },
-        { header: 'Remarks', key: 'remarks', width: 30 },
-        { header: 'Client ID', key: 'client_id', width: 12 },
-        { header: 'Request ID', key: 'request_id', width: 12 },
-      ],
-      rows: items.map((i) => ({
-        beneficiary: i.bank_account_name || i.driver_name,
-        account: i.bank_account_no || '',
-        ifsc: i.bank_ifsc || '',
-        amount: i.amount,
-        mode: i.amount >= 200000 ? 'RTGS' : 'NEFT',
-        remarks: `Advance ${i.registration_no} ${i.reason}`.slice(0, 40),
-        client_id: i.client_id || '',
-        request_id: `ADV-${i.id}`,
-      })),
-      notes: [`Total: INR ${batch.total_amount.toLocaleString('en-IN')} across ${items.length} beneficiaries.`],
-    });
+    const format = req.query.format === 'csv' ? 'csv' : 'xlsx';
+    const file = await buildHdfcFile(items.map((i) => ({
+      name: i.bank_account_name || i.driver_name,
+      employeeId: i.client_id,
+      account: i.bank_account_no || '',
+      ifsc: i.bank_ifsc || '',
+      amount: i.amount,
+    })), { date: batch.batch_date, format });
 
-    saveBuffer(buf, {
-      filename: `advance-batch-${batch.id}.xlsx`, mime: XLSX_MIME,
+    const filename = `hdfc-advances-${batch.batch_date}-run${batch.id}.${file.ext}`;
+    saveBuffer(file.buffer, {
+      filename, mime: file.mime,
       ownerType: 'advance_batch', ownerId: batch.id, kind: 'register', userId: req.user.id,
     });
-    res.setHeader('Content-Type', XLSX_MIME);
-    res.setHeader('Content-Disposition', `attachment; filename="advance-batch-${batch.id}.xlsx"`);
-    res.send(buf);
+    res.setHeader('Content-Type', file.mime);
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(file.buffer);
   }),
 );
 

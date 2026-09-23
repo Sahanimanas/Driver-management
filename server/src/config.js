@@ -21,6 +21,9 @@ export const config = {
   rules: {
     expenseDirectorThreshold: Number(process.env.EXPENSE_DIRECTOR_THRESHOLD || 3000),
     netbankingMaxRequests: Number(process.env.NETBANKING_MAX_REQUESTS || 4),
+    // A month's advances may not exceed this share of the salary the driver
+    // has earned so far on attendance.
+    advanceLimitPercent: Number(process.env.ADVANCE_LIMIT_PERCENT || 50),
     cutoffs: { NOON: '12:00', EVENING: '18:30' },
     // Attendance codes that are payable days for the wage register.
     payableCodes: { P: 1, T: 1, TA: 1, L: 0, LE: 0 },
@@ -53,6 +56,14 @@ export const config = {
     // Where the local engine keeps its downloaded language packs.
     cacheDir: process.env.OCR_CACHE_DIR
       || path.join(process.env.DATA_DIR || path.join(ROOT, 'data'), 'ocr'),
+  },
+
+  // HDFC RBI Adapter upload sheet. The company's email goes in every row's
+  // "Beneficiary email id", and "VENDOR" is the customer reference the bank
+  // statement shows, exactly as on the sheets Finance uploads today.
+  hdfc: {
+    email: process.env.HDFC_EMAIL || 'Info@dimacin.com',
+    customerRef: process.env.HDFC_CUSTOMER_REF || 'VENDOR',
   },
 
   // Branding. The client is supplying the trading name and the logo; both are

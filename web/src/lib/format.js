@@ -46,6 +46,7 @@ export const STATUS_TONE = {
   pending: 'grey', held: 'red', in_bank: 'violet',
   active: 'green', ended: 'grey', open: 'amber', sent: 'green', sending: 'amber',
   queued: 'grey', failed: 'red', passed: 'green',
+  recovered: 'green', cancelled: 'grey',
 };
 
 export const STATUS_LABEL = {
@@ -57,5 +58,6 @@ export const STATUS_LABEL = {
   in_screening: 'In Screening',
   attendance_finalized: 'Attendance Finalised',
   in_bank: 'Sent to Bank',
+  open: 'Open',
 };
 

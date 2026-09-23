@@ -3,10 +3,16 @@ import { Link, useNavigate } from 'react-router-dom';
 import { Page } from '../App.jsx';
 import { api, fileUrl } from '../lib/api.js';
 import { useAsync, useAuth, Card, Loading, ErrorBanner, Empty, Avatar } from '../lib/ui.jsx';
-import { date, inr0 } from '../lib/format.js';
+import { date } from '../lib/format.js';
 import StatusChip from '../components/StatusChip.jsx';
 
 const STATUSES = ['registered', 'in_screening', 'cleared', 'deployed', 'left', 'rejected'];
+
+/** Views that cut across the status: who could be deployed, and who never may. */
+const VIEWS = [
+  ['not_deployed', 'Registered, not deployed', '&deployed=false'],
+  ['blacklisted', 'Blacklisted', '&blacklisted=true'],
+];
 
 export default function Drivers() {
   const { can } = useAuth();
@@ -18,7 +24,11 @@ export default function Drivers() {
 
   const locations = useAsync(() => api.get('/drivers/locations'), []);
   const { data, loading, error, reload } = useAsync(
-    () => api.get(`/drivers?search=${encodeURIComponent(query)}&status=${status}&location=${encodeURIComponent(location)}&limit=200`),
+    () => {
+      const view = VIEWS.find(([k]) => k === status);
+      const filter = view ? view[2] : `&status=${status}`;
+      return api.get(`/drivers?search=${encodeURIComponent(query)}${filter}&location=${encodeURIComponent(location)}&limit=200`);
+    },
     [query, status, location],
   );
 
@@ -44,6 +54,9 @@ export default function Drivers() {
         <select value={status} onChange={(e) => setStatus(e.target.value)}>
           <option value="">All statuses</option>
           {STATUSES.map((s) => <option key={s} value={s}>{s.replace('_', ' ')}</option>)}
+          <optgroup label="Views">
+            {VIEWS.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+          </optgroup>
         </select>
         <select value={location} onChange={(e) => setLocation(e.target.value)}>
           <option value="">All locations</option>
@@ -65,13 +78,13 @@ export default function Drivers() {
               <thead>
                 <tr>
                   <th>Driver</th>
-                  <th>Registration No</th>
+                  <th>Registration ID</th>
                   <th>Client ID</th>
                   <th>Status</th>
                   <th>Vehicle</th>
                   <th>Location</th>
                   <th>Date of joining</th>
-                  <th className="num">Monthly wage</th>
+                  <th>Salary class</th>
                   <th>DL validity</th>
                 </tr>
               </thead>
@@ -90,11 +103,14 @@ export default function Drivers() {
                     </td>
                     <td className="mono">{d.registration_no}</td>
                     <td className="mono">{d.client_id || <span className="muted">—</span>}</td>
-                    <td><StatusChip value={d.status} /></td>
+                    <td>
+                      <StatusChip value={d.status} />
+                      {d.blacklisted ? <span className="chip red" style={{ marginLeft: 4 }}>blacklisted</span> : null}
+                    </td>
                     <td className="mono">{d.vehicle_number || '—'}</td>
                     <td>{d.location || '—'}</td>
                     <td className="nowrap">{d.date_of_joining ? date(d.date_of_joining) : '—'}</td>
-                    <td className="num">{d.monthly_wage ? inr0(d.monthly_wage) : '—'}</td>
+                    <td>{d.salary_class || <span className="muted">—</span>}</td>
                     <td className="nowrap">
                       {d.dl_valid_till
                         ? <span className={`chip ${d.dl_valid_till < new Date().toISOString().slice(0, 10) ? 'red' : 'grey'}`}>

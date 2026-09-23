@@ -2,6 +2,8 @@ import { Router } from 'express';
 import { q, tx, audit } from '../db.js';
 import { authenticate, allow } from '../auth.js';
 import { loadStructure } from './salary-master.js';
+import { blacklist } from './drivers.js';
+import { checkLocation } from './settings.js';
 import { h, need, bad, notFound, isDate, today, diffDays, humanDuration, digits, money } from '../util.js';
 
 const router = Router();
@@ -22,6 +24,69 @@ function lsaMonthly(v) {
   }
   return money(n);
 }
+
+/**
+ * Registered but not deployed: the drivers a supervisor can put forward.
+ * Blacklisted and client-rejected drivers are left out; a driver who left and
+ * may rejoin is in, with the date they last left.
+ */
+router.get(
+  '/undeployed',
+  h(async (req, res) => {
+    const search = String(req.query.search || '').trim();
+    const params = [];
+    let filter = '';
+    if (search) {
+      filter = 'AND (d.name LIKE ? OR d.registration_no LIKE ? OR d.phone LIKE ?)';
+      const like = `%${search}%`;
+      params.push(like, like, like);
+    }
+    const rows = q.all(
+      `SELECT d.id, d.registration_no, d.name, d.phone, d.photo_id, d.status, d.created_at,
+              d.bank_account_no, d.bank_ifsc,
+              (SELECT count(*) FROM screenings s WHERE s.driver_id = d.id AND s.status = 'passed') AS screenings_passed,
+              (SELECT count(*) FROM screenings s WHERE s.driver_id = d.id AND s.status = 'failed') AS screenings_failed,
+              (SELECT e.date_of_leaving FROM employments e WHERE e.driver_id = d.id
+                ORDER BY e.date_of_joining DESC LIMIT 1) AS last_left_on,
+              (SELECT e.client_id FROM employments e WHERE e.driver_id = d.id
+                ORDER BY e.date_of_joining DESC LIMIT 1) AS last_client_id
+         FROM drivers d
+        WHERE d.blacklisted = 0 AND d.status <> 'rejected'
+          AND NOT EXISTS (SELECT 1 FROM employments e WHERE e.driver_id = d.id AND e.status = 'active')
+          ${filter}
+        ORDER BY d.created_at DESC`,
+      ...params,
+    );
+    res.json(rows.map((r) => ({
+      ...r,
+      screenings_total: SCREENING_TYPES.length,
+      ready: Number(r.screenings_passed) === SCREENING_TYPES.length,
+    })));
+  }),
+);
+
+/**
+ * Blacklisted drivers, with the date they left -- which is the date recorded
+ * in the attendance sheet (marking LE there, or ending the deployment, writes
+ * it onto the deployment).
+ */
+router.get(
+  '/blacklisted',
+  h(async (_req, res) => {
+    res.json(q.all(
+      `SELECT d.id, d.registration_no, d.name, d.phone, d.photo_id, d.status,
+              d.blacklisted_on, d.blacklist_reason, u.name AS blacklisted_by_name,
+              e.client_id AS last_client_id, e.location AS last_location,
+              e.date_of_joining AS last_joined_on, e.date_of_leaving, e.exit_reason
+         FROM drivers d
+         LEFT JOIN users u ON u.id = d.blacklisted_by
+         LEFT JOIN employments e ON e.id = (
+           SELECT id FROM employments WHERE driver_id = d.id ORDER BY date_of_joining DESC LIMIT 1)
+        WHERE d.blacklisted = 1
+        ORDER BY d.blacklisted_on DESC`,
+    ));
+  }),
+);
 
 router.get(
   '/',
@@ -44,8 +109,10 @@ router.get(
     }
     res.json(
       q.all(
-        `SELECT e.*, d.name, d.registration_no, d.phone, d.photo_id, d.status AS driver_status
+        `SELECT e.*, d.name, d.registration_no, d.phone, d.photo_id, d.status AS driver_status,
+                d.blacklisted, s.name AS salary_class, s.code AS salary_class_code
          FROM employments e JOIN drivers d ON d.id = e.driver_id
+         LEFT JOIN salary_structures s ON s.id = e.salary_structure_id
          ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
          ORDER BY e.date_of_joining DESC`,
         ...params,
@@ -67,6 +134,13 @@ router.post(
     const driverId = Number(req.body.driver_id);
     const driver = q.get('SELECT * FROM drivers WHERE id = ?', driverId);
     if (!driver) throw notFound('Driver not found');
+    if (driver.blacklisted) {
+      throw bad(
+        `${driver.name} is blacklisted (${driver.blacklist_reason || 'no reason recorded'}). `
+          + 'The blacklist has to be lifted by Admin / Director before they can be deployed.',
+        { code: 'BLACKLISTED' },
+      );
+    }
 
     const clientId = String(req.body.client_id).trim();
     if (!/^\d{6}$/.test(clientId)) throw bad('Client ID must be exactly six digits');
@@ -101,15 +175,14 @@ router.post(
       );
     }
 
-    // "Once driver is deployed, it is linked to a salary structure."
+    // "Once driver is deployed, it is linked to a salary structure." The salary
+    // class is mandatory on the deployment screen; the wage comes from it.
     const structure = loadStructure(req.body.salary_structure_id);
     if (req.body.salary_structure_id && !structure) throw notFound('Salary structure not found');
-    if (!structure && !req.body.monthly_wage) {
-      throw bad(
-        'Pick a salary structure from the salary master, or enter a monthly wage for this deployment.',
-        { code: 'NO_SALARY_STRUCTURE' },
-      );
+    if (!structure) {
+      throw bad('Pick the salary class for this deployment.', { code: 'NO_SALARY_STRUCTURE' });
     }
+    const location = checkLocation(req.body.location);
     if (structure && !structure.active) {
       throw bad(`Salary structure ${structure.code} is no longer active — pick a current one.`);
     }
@@ -148,7 +221,7 @@ router.post(
         clientId,
         doj,
         req.body.vehicle_number ? String(req.body.vehicle_number).toUpperCase().replace(/\s/g, '') : null,
-        req.body.location || null,
+        location,
         // The structure sets the wage unless one is entered explicitly.
         money(req.body.monthly_wage || structure?.monthly_gross || 0),
         structure?.id || null,
@@ -207,6 +280,7 @@ router.patch(
       if (req.body.monthly_wage === undefined) patch.monthly_wage = structure.monthly_gross;
     }
     if (patch.date_of_joining && !isDate(patch.date_of_joining)) throw bad('Date of joining must be YYYY-MM-DD');
+    if (patch.location !== undefined) patch.location = checkLocation(patch.location);
     if (patch.vehicle_number) patch.vehicle_number = String(patch.vehicle_number).toUpperCase().replace(/\s/g, '');
     if (patch.monthly_wage !== undefined) patch.monthly_wage = Number(patch.monthly_wage) || 0;
     if (patch.lsa_monthly !== undefined) patch.lsa_monthly = lsaMonthly(patch.lsa_monthly);
@@ -232,6 +306,10 @@ router.post(
 
     const lastDay = req.body.date_of_leaving || today();
     if (!isDate(lastDay)) throw bad('date_of_leaving must be YYYY-MM-DD');
+    const blacklistReason = req.body.blacklist ? String(req.body.blacklist_reason || '').trim() : '';
+    if (req.body.blacklist && blacklistReason.length < 3) {
+      throw bad('Record the reason for blacklisting the driver');
+    }
     if (diffDays(emp.date_of_joining, lastDay) < 0) {
       throw bad('Date of leaving cannot be before the date of joining');
     }
@@ -257,6 +335,7 @@ router.post(
         q.run("UPDATE drivers SET status = 'left', updated_at = datetime('now') WHERE id = ?", emp.driver_id);
       }
       audit(req.user.id, 'employment', emp.id, 'ended', { lastDay, reason: req.body.exit_reason });
+      if (req.body.blacklist) blacklist(emp.driver_id, blacklistReason, req.user.id);
     });
 
     const stints = q.all('SELECT date_of_joining, date_of_leaving FROM employments WHERE driver_id = ?', emp.driver_id);

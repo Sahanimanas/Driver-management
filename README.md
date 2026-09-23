@@ -28,7 +28,7 @@ nobody may approve a request they raised themselves.
 ## Checking it
 
 ```bash
-npm run test:api          # 34 API checks against a running server
+npm run test:api          # 65 API checks against a running server
 npm run test:extraction   # registration data extraction over testing_docs/
 npm run scope-status      # regenerate Quantum_Scope_Status.xlsx
 ```
@@ -53,9 +53,13 @@ pasted text until you supply credentials.
 
 ### Registration
 `Drivers → Register driver` captures name, photo, phone, Aadhar, address, date
-of birth, driving licence with validity, copies of the Aadhar and licence, two
-reference contacts, bank details and UAN. A registration number
+of birth, driving licence with validity, the Aadhar and licence **front and
+back**, two reference contacts, bank details and UAN. A unique registration ID
 (`QDM/YYYY/00001`) is allotted on save.
+
+The bank section asks only for the **account number, IFSC and account holder's
+name**, with a **cancelled cheque or passbook** page as proof. The bank's name is
+read off the IFSC.
 
 - The Aadhar date of birth is checked against the date of birth on the licence.
   A mismatch is blocked unless it is explicitly recorded as an exception.
@@ -93,8 +97,18 @@ runs the extractor over the real client page and asserts the result.
 
 ### Screening and deployment
 Every registration opens a checklist — trial test, safety orientation, medical.
-Deployment is blocked until all three pass. Deployment records the six digit
-client ID, date of joining (billing starts here), vehicle number and location.
+Deployment is blocked until all three pass.
+
+`Deployments` opens on the **drivers registered but not deployed**, each with a
+**Deploy** button. The deployment screen shows the driver's registered details
+and asks for **Client ID\***, **Vehicle No**, **Location** (picked from the list
+Admin / Director keeps in Settings), **Date of joining\*** and **Salary class\***
+— the structure from the salary master, by name; no amounts are shown there.
+
+A driver can be **blacklisted** — when ending a deployment, or from the profile
+once they have left. The Blacklisted tab lists them with the **date of leaving
+recorded in the attendance sheet**. A blacklisted driver cannot be deployed until
+Admin / Director lifts the blacklist.
 
 ### Rejoining, and linked IDs
 When a driver leaves and returns, the client issues a **new** six digit ID. It
@@ -141,11 +155,23 @@ month and what they have accrued from the attendance actually on record**,
 along with the unrecovered balance and what is left after this request — in red
 if it takes them past what they have earned.
 
+**A month's advances may not exceed 50% of the salary earned on the attendance
+so far** (`ADVANCE_LIMIT_PERCENT`). The approval window shows what has been paid,
+the limit and what can still be approved; an approval above it is refused.
+
 Approved requests accumulate to the **noon** and **18:30** cut-offs. A run of up
 to four requests is paid through internet banking and the UTRs recorded
-individually; beyond four the system generates a bank upload sheet. The
+individually; beyond four the system generates a bank upload sheet.
+**HDFC sheet for the day** puts every approved advance waiting to be paid into
+one run and one HDFC ENet bulk upload file (.xlsx, or headerless .csv). The
 **advance register** downloads for any date range, and paid advances are
 recovered automatically from the next salary.
+
+### Challans and debits
+`Advances → Challans / Debits` records a challan or debit against a driver —
+driver, details, date, reason, amount. Collating the salary deducts what is open
+**after advances**; whatever one month cannot cover is carried to the next. The
+recovery is applied to the debits, oldest first, when the salary is paid.
 
 ### Expenses and petty cash
 Supervisors raise purchase requirements and reimbursements against a driver or

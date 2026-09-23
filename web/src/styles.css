@@ -374,3 +374,15 @@ label.field.invalid > textarea:focus { outline-color: var(--red); }
 .ledger .grp.final.over { background: #fdf3f2; }
 .ledger .grp.final.ok .ln.big .v { color: var(--green); }
 .ledger .grp.final.over .ln.big .v { color: var(--red); }
+
+/* The registered driver's details at the top of the deployment screen. */
+.deploy-driver {
+  display: flex; gap: 14px; align-items: flex-start;
+  padding: 12px 14px; margin-bottom: 14px;
+  background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius);
+}
+
+/* The advance ceiling in the approval window. */
+.ledger .grp.limit { background: #f5f8fc; }
+.ledger .grp.limit.breach { background: #fdf3f2; }
+.ledger .grp.limit.breach .ln.sub .v { color: var(--red); }

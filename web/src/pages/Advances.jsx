@@ -7,6 +7,7 @@ import {
 } from '../lib/ui.jsx';
 import { date, dateTime, inr, inr0, today } from '../lib/format.js';
 import StatusChip, { ApprovalSteps } from '../components/StatusChip.jsx';
+import DebitModal from '../components/DebitModal.jsx';
 
 export default function Advances() {
   const { can, user } = useAuth();
@@ -25,12 +26,14 @@ export default function Advances() {
           </>
         )}
         <button className={tab === 'register' ? 'active' : ''} onClick={() => setTab('register')}>Advance register</button>
+        <button className={tab === 'debits' ? 'active' : ''} onClick={() => setTab('debits')}>Challans / Debits</button>
       </div>
 
       {tab === 'requests' && <Requests />}
       {tab === 'payments' && <Payments />}
       {tab === 'batches' && <Batches />}
       {tab === 'register' && <Register />}
+      {tab === 'debits' && <Debits />}
     </Page>
   );
 }
@@ -148,6 +151,12 @@ function NewRequest({ onClose, onDone }) {
     () => (search.length >= 2 ? api.get(`/drivers?search=${encodeURIComponent(search)}&deployed=true&limit=8`) : Promise.resolve({ rows: [] })),
     [search],
   );
+  const position = useAsync(
+    () => (driver ? api.get(`/advances/context/${driver.id}?on=${form.request_date}`) : Promise.resolve(null)),
+    [driver?.id, form.request_date],
+  );
+  const pos = position.data;
+  const overLimit = pos && Number(form.amount) > pos.eligible;
 
   async function submit() {
     setBusy(true);
@@ -206,6 +215,20 @@ function NewRequest({ onClose, onDone }) {
         </>
       )}
 
+      {pos && (
+        <div className={`banner ${overLimit ? 'warn' : 'info'}`}>
+          <span>₹</span>
+          <div>
+            Can be advanced up to <b>{inr(pos.eligible)}</b> this month — {pos.limitPercent}% of
+            {' '}{inr(pos.accruedSalary)} earned over {pos.payableDays} day(s) of attendance
+            {pos.grantedThisMonth > 0 && <>, less {inr(pos.grantedThisMonth)} already approved or paid</>}.
+            {overLimit && <div style={{ marginTop: 4 }}>
+              This request is over the limit — Admin / Director can approve only up to {inr(pos.eligible)}.
+            </div>}
+          </div>
+        </div>
+      )}
+
       <div className="grid c2">
         <Field label="Amount (INR)">
           <input type="number" value={form.amount}
@@ -230,9 +253,11 @@ function DecisionModal({ a, decision, onClose, onDone }) {
   // The approver may sign off a smaller (or larger) figure than was asked for.
   const [amount, setAmount] = useState(a.amount);
   const [busy, setBusy] = useState(false);
+  const [eligible, setEligible] = useState(null);
 
   const adjusted = decision === 'approve' && Number(amount) !== Number(a.amount);
-  const valid = decision !== 'approve' || Number(amount) > 0;
+  const withinLimit = eligible === null || Number(amount) <= eligible;
+  const valid = decision !== 'approve' || (Number(amount) > 0 && withinLimit);
 
   async function submit() {
     setBusy(true);
@@ -278,6 +303,7 @@ function DecisionModal({ a, decision, onClose, onDone }) {
         advanceId={a.id}
         amount={amount}
         onAmountChange={decision === 'approve' ? setAmount : undefined}
+        onLoaded={(ctx) => setEligible(ctx.eligible)}
       />
       <Field label="Remarks" hint="optional">
         <textarea value={remarks} onChange={(e) => setRemarks(e.target.value)} style={{ minHeight: 60 }} />
@@ -291,8 +317,11 @@ function DecisionModal({ a, decision, onClose, onDone }) {
  * been given to the driver for the month and how much salary is accrued as per
  * attendance." Both, plus what is left once this request is met.
  */
-function ApprovalContext({ advanceId, amount, onAmountChange }) {
-  const { data, error } = useAsync(() => api.get(`/advances/${advanceId}/context`), [advanceId]);
+function ApprovalContext({ advanceId, amount, onAmountChange, onLoaded }) {
+  const { data, error } = useAsync(
+    () => api.get(`/advances/${advanceId}/context`).then((d) => { onLoaded?.(d); return d; }),
+    [advanceId],
+  );
 
   if (error) return <div className="banner error"><span>⚠</span><div>{error.message}</div></div>;
   if (!data) return <div className="loading"><span className="spinner" /> Loading the driver's position…</div>;
@@ -310,10 +339,30 @@ function ApprovalContext({ advanceId, amount, onAmountChange }) {
   // Negative: the driver has taken more than they have earned and carries it.
   const balance = round2(earned - withThis);
   const over = balance < 0;
+  const breach = asked > data.eligible;
 
   return (
     <>
       <div className="ledger">
+        <div className={`grp limit${breach ? ' breach' : ''}`}>
+          <div className="grp-head">Advance limit — {data.limitPercent}% of salary earned on attendance</div>
+          <Line label="Paid to the driver this month" value={data.paidThisMonth}
+            note={data.approvedThisMonth ? `plus ${inr(data.approvedThisMonth)} approved, awaiting payment` : undefined} />
+          <Line label={`Limit (${data.limitPercent}% of ${inr(earned)})`} value={data.advanceLimit}
+            note={`${data.payableDays} day(s) of attendance at ${inr(data.ratePerDay)}/day`} muted />
+          <Line label="Can still be approved" value={data.eligible} sub />
+          {breach && (
+            <div className="small" style={{ marginTop: 6 }}>
+              {inr(asked)} is over the limit by {inr(round2(asked - data.eligible))}.
+              {onAmountChange && data.eligible > 0 && (
+                <> <button className="sm" onClick={() => onAmountChange(data.eligible)}>
+                  Approve {inr(data.eligible)} instead</button></>
+              )}
+              {data.eligible <= 0 && ' Nothing more can be approved this month on the attendance so far.'}
+            </div>
+          )}
+        </div>
+
         <div className="grp">
           <div className="grp-head">Advances this month ({data.period})</div>
           <Line label="Requested, awaiting approval" value={data.requestedThisMonth} muted />
@@ -360,12 +409,14 @@ function ApprovalContext({ advanceId, amount, onAmountChange }) {
           </div>
         </div>
 
-        {data.outstanding > 0 && (
+        {/* Paid advances are deducted in full from the month's salary when it is
+            paid, so nothing carries over from earlier months to show here. */}
+        {data.openDebits > 0 && (
           <div className="grp">
             <Line
-              label="Unrecovered from earlier months"
-              value={data.outstanding}
-              note="recovered automatically from salary"
+              label="Challans / debits still to recover"
+              value={data.openDebits}
+              note="also recovered from salary, after advances"
               muted
             />
           </div>
@@ -458,6 +509,31 @@ function Payments() {
   const [busy, setBusy] = useState(false);
   const { data, loading, error, reload } = useAsync(() => api.get('/advances/payable'), []);
 
+  const [sheetDate, setSheetDate] = useState(today());
+  const [dayBusy, setDayBusy] = useState(false);
+
+  /** Every approved advance up to the date, in one HDFC bulk upload. */
+  async function daySheet(format) {
+    setDayBusy(true);
+    try {
+      const res = await api.post('/advances/day-sheet', { date: sheetDate });
+      await api.download(
+        `/advances/batches/${res.batch.id}/sheet${format === 'csv' ? '?format=csv' : ''}`,
+        `hdfc-advances-${sheetDate}-run${res.batch.id}.${format}`,
+      );
+      toast.success(`${res.count} advance(s), ${inr(res.total)}, in payment run #${res.batch.id}. `
+        + 'Upload the file in HDFC, then record the payment under Past runs.');
+      if (res.skipped?.length) {
+        toast.error(`Left out for missing bank details: ${res.skipped.map((s) => s.driver).join(', ')}`);
+      }
+      reload();
+    } catch (err) {
+      toast.error(err);
+    } finally {
+      setDayBusy(false);
+    }
+  }
+
   const chosen = Object.entries(selected).filter(([, v]) => v).map(([k]) => Number(k));
   const chosenItems = (data?.groups || []).flatMap((g) => g.items).filter((i) => chosen.includes(i.id));
   const chosenTotal = chosenItems.reduce((s, i) => s + i.amount, 0);
@@ -490,6 +566,25 @@ function Payments() {
           the system generates a bank upload sheet.
         </div>
       </div>
+
+      {data.groups.length > 0 && (
+        <Card title="HDFC bulk payment — the day's advances">
+          <div className="row wrap">
+            <Field label="Advances approved up to">
+              <input type="date" value={sheetDate} max={today()} onChange={(e) => setSheetDate(e.target.value)} />
+            </Field>
+            <div className="spacer" style={{ flex: 1 }} />
+            <button className="primary" disabled={dayBusy} onClick={() => daySheet('xlsx')}>
+              {dayBusy ? <span className="spinner" /> : '⭳ HDFC sheet (.xlsx)'}
+            </button>
+            <button disabled={dayBusy} onClick={() => daySheet('csv')}>⭳ HDFC file (.csv)</button>
+          </div>
+          <p className="small muted" style={{ marginBottom: 0 }}>
+            Puts every approved advance waiting to be paid, up to the date, into one payment run and
+            one file for HDFC bulk upload. Drivers without bank details are left out and named.
+          </p>
+        </Card>
+      )}
 
       {data.groups.length === 0 && (
         <Card><p className="muted" style={{ margin: 0 }}>Nothing is approved and waiting for payment.</p></Card>
@@ -533,7 +628,7 @@ function Payments() {
                       ? <span className="mono">{i.bank_ifsc} · …{String(i.bank_account_no).slice(-4)}</span>
                       : <span className="chip red">bank details missing</span>}
                   </td>
-                  <td className="small muted">{dateTime(i.director_at)}</td>
+                  <td className="small muted">{dateTime(i.approved_at)}</td>
                 </tr>
               ))}
             </tbody>
@@ -595,8 +690,12 @@ function Batches() {
                 <td><StatusChip value={b.status === 'paid' ? 'paid' : 'open'} /></td>
                 <td className="right nowrap">
                   {b.method === 'sheet' && (
-                    <button className="sm" onClick={() => api.download(
-                      `/advances/batches/${b.id}/sheet`, `advance-batch-${b.id}.xlsx`)}>⭳ Sheet</button>
+                    <>
+                      <button className="sm" onClick={() => api.download(
+                        `/advances/batches/${b.id}/sheet`, `hdfc-advances-${b.batch_date}-run${b.id}.xlsx`)}>⭳ HDFC .xlsx</button>{' '}
+                      <button className="sm" onClick={() => api.download(
+                        `/advances/batches/${b.id}/sheet?format=csv`, `hdfc-advances-${b.batch_date}-run${b.id}.csv`)}>.csv</button>
+                    </>
                   )}{' '}
                   {b.status === 'open' && <button className="sm primary" onClick={() => setPaying(b)}>Record payment</button>}
                 </td>
@@ -722,5 +821,197 @@ function Register() {
         )}
       </Card>
     </>
+  );
+}
+
+// ------------------------------------------------------- challans / debits
+/**
+ * Challans and debits raised against drivers. Each is recovered from salary
+ * after advances; the list shows how much of each is still to come back.
+ */
+function Debits() {
+  const { can } = useAuth();
+  const toast = useToast();
+  const [status, setStatus] = useState(can('admin') ? 'pending_approval' : 'open');
+  const [raising, setRaising] = useState(false);
+  const [cancelling, setCancelling] = useState(null);
+  const [deciding, setDeciding] = useState(null);
+  const { data, error, reload } = useAsync(() => api.get(`/debits?status=${status}`), [status]);
+
+  return (
+    <>
+      <div className="grid c4" style={{ marginBottom: 16 }}>
+        <Stat tone="amber" label="Still to recover" value={data ? inr0(data.totals.outstanding) : '—'}
+          foot="from the next salary" />
+        <Stat tone="violet" label="Awaiting approval" value={data ? data.totals.pending : '—'}
+          foot="in this view · Admin / Director" />
+        <Stat label="In this view" value={data ? data.totals.count : '—'}
+          foot={data ? inr0(data.totals.amount) : ''} />
+      </div>
+
+      <div className="toolbar">
+        <select value={status} onChange={(e) => setStatus(e.target.value)}>
+          <option value="pending_approval">Awaiting approval</option>
+          <option value="open">Open — being recovered</option>
+          <option value="recovered">Recovered</option>
+          <option value="rejected">Rejected</option>
+          <option value="cancelled">Cancelled</option>
+          <option value="">All</option>
+        </select>
+        <div className="spacer" />
+        <button onClick={() => api.download(`/debits/register?status=${status}`, 'challans-debits.xlsx')}>
+          ⭳ Download register
+        </button>
+        {can('supervisor', 'finance') && (
+          <button className="primary" onClick={() => setRaising(true)}>+ Challan / debit</button>
+        )}
+      </div>
+
+      <ErrorBanner error={error} onRetry={reload} />
+
+      <Card tight>
+        {!data ? (error ? null : <Loading what="challans and debits" />) : (
+          <div className="tbl-wrap">
+            <table className="tbl">
+              <thead>
+                <tr>
+                  <th>Date</th><th>Driver</th><th>Type</th><th>Details</th><th>Reason</th>
+                  <th className="num">Amount</th><th className="num">Outstanding</th><th>Status</th>
+                  <th>Raised by</th><th />
+                </tr>
+              </thead>
+              <tbody>
+                {data.rows.length === 0 && <Empty>Nothing in this view.</Empty>}
+                {data.rows.map((x) => (
+                  <tr key={x.id}>
+                    <td className="nowrap">{date(x.debit_date)}</td>
+                    <td>
+                      <Link to={`/drivers/${x.driver_id}`}><b>{x.driver_name}</b></Link>
+                      <div className="muted small mono">{x.client_id || x.registration_no}</div>
+                    </td>
+                    <td><span className={`chip ${x.kind === 'challan' ? 'violet' : 'grey'}`}>
+                      {x.kind === 'challan' ? 'Challan' : 'Debit'}</span></td>
+                    <td className="small">{x.details}</td>
+                    <td className="small">{x.reason}</td>
+                    <td className="num">{inr(x.amount)}</td>
+                    <td className="num">{x.status === 'open' ? <b>{inr(x.outstanding)}</b> : '—'}</td>
+                    <td>
+                      <StatusChip value={x.status} />
+                      {x.cancel_reason && <div className="muted small">{x.cancel_reason}</div>}
+                      {x.approval_remarks && <div className="muted small">{x.approval_remarks}</div>}
+                    </td>
+                    <td className="small">
+                      {x.created_by_name}
+                      {x.approved_by_name && (
+                        <div className="muted">
+                          {x.status === 'rejected' ? 'rejected' : 'approved'} by {x.approved_by_name}
+                        </div>
+                      )}
+                    </td>
+                    <td className="right nowrap">
+                      {x.canDecide && <button className="sm primary" onClick={() => setDeciding(x)}>Review</button>}{' '}
+                      {x.canCancel && <button className="sm" onClick={() => setCancelling(x)}>Cancel</button>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+
+      {raising && (
+        <DebitModal
+          onClose={() => setRaising(false)}
+          onDone={() => { setRaising(false); toast.success('Sent to Admin / Director for approval'); reload(); }}
+        />
+      )}
+      {deciding && (
+        <DecideDebit
+          debit={deciding}
+          onClose={() => setDeciding(null)}
+          onDone={(approved) => {
+            setDeciding(null);
+            toast.success(approved ? 'Approved — it will be recovered from the next salary' : 'Rejected');
+            reload();
+          }}
+        />
+      )}
+      {cancelling && (
+        <CancelDebit
+          debit={cancelling}
+          onClose={() => setCancelling(null)}
+          onDone={() => { setCancelling(null); toast.success('Cancelled'); reload(); }}
+        />
+      )}
+    </>
+  );
+}
+
+function DecideDebit({ debit, onClose, onDone }) {
+  const toast = useToast();
+  const [remarks, setRemarks] = useState('');
+  const [busy, setBusy] = useState(false);
+  async function decide(decision) {
+    setBusy(true);
+    try {
+      await api.post(`/debits/${debit.id}/decision`, { decision, remarks });
+      onDone(decision === 'approve');
+    } catch (err) {
+      toast.error(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <Modal title={`Approve ${debit.kind} — ${debit.driver_name}`} onClose={onClose}
+      footer={<>
+        <button onClick={onClose}>Close</button>
+        <button className="danger" onClick={() => decide('reject')} disabled={busy || !remarks.trim()}
+          title={remarks.trim() ? '' : 'Record why it is being rejected'}>Reject</button>
+        <button className="primary" onClick={() => decide('approve')} disabled={busy}>Approve</button>
+      </>}>
+      <table className="tbl" style={{ marginBottom: 14 }}>
+        <tbody>
+          <tr><td className="muted">Date</td><td>{date(debit.debit_date)}</td></tr>
+          <tr><td className="muted">Details</td><td>{debit.details}</td></tr>
+          <tr><td className="muted">Reason</td><td>{debit.reason}</td></tr>
+          <tr><td className="muted">Amount</td><td><b>{inr(debit.amount)}</b></td></tr>
+          <tr><td className="muted">Raised by</td><td>{debit.created_by_name}</td></tr>
+        </tbody>
+      </table>
+      <Field label="Remarks" hint="required to reject">
+        <textarea value={remarks} onChange={(e) => setRemarks(e.target.value)} style={{ minHeight: 60 }} />
+      </Field>
+    </Modal>
+  );
+}
+
+function CancelDebit({ debit, onClose, onDone }) {
+  const toast = useToast();
+  const [reason, setReason] = useState('');
+  const [busy, setBusy] = useState(false);
+  async function submit() {
+    setBusy(true);
+    try {
+      await api.post(`/debits/${debit.id}/cancel`, { reason });
+      onDone();
+    } catch (err) {
+      toast.error(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <Modal title={`Cancel ${debit.kind} — ${debit.driver_name}`} onClose={onClose}
+      footer={<>
+        <button onClick={onClose}>Keep it</button>
+        <button className="danger" onClick={submit} disabled={busy || reason.trim().length < 3}>Cancel it</button>
+      </>}>
+      <p style={{ marginTop: 0 }}>{debit.details} — {inr(debit.amount)}</p>
+      <Field label="Why is it being cancelled?" required>
+        <textarea value={reason} onChange={(e) => setReason(e.target.value)} style={{ minHeight: 60 }} />
+      </Field>
+    </Modal>
   );
 }

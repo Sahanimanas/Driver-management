@@ -55,8 +55,8 @@ export default function Salary() {
         <Stat label="Drivers" value={totals?.count ?? '—'} foot={totals ? `${totals.paid} paid, ${totals.held} on hold` : ''} />
         <Stat tone="good" label="Net payable" value={totals ? inr0(totals.net) : '—'}
           foot={totals ? `gross ${inr0(totals.gross)}` : ''} />
-        <Stat tone="warn" label="Advance recovery" value={totals ? inr0(totals.advance) : '—'}
-          foot={totals ? `held back ${inr0(totals.heldAmount)}` : ''} />
+        <Stat tone="warn" label="Recoveries" value={totals ? inr0(totals.advance + totals.debit) : '—'}
+          foot={totals ? `advances ${inr0(totals.advance)} · challans ${inr0(totals.debit)}` : ''} />
       </div>
 
       {manage && (
@@ -84,8 +84,12 @@ export default function Salary() {
               3b · ⭳ Pay register (client format)
             </button>
             <button disabled={!p} className="primary"
-              onClick={() => api.download(`/salary/periods/${period}/enet-sheet`, `hdfc-enet-${period}.xlsx`)}>
-              4 · ⭳ HDFC e-Net payment sheet
+              onClick={() => api.download(`/salary/periods/${period}/enet-sheet`, `hdfc-salary-${period}.xlsx`)}>
+              4 · ⭳ HDFC bulk payment sheet
+            </button>
+            <button disabled={!p} title="The same payments as a headerless .csv, the form ENet takes it in"
+              onClick={() => api.download(`/salary/periods/${period}/enet-sheet?format=csv`, `hdfc-salary-${period}.csv`)}>
+              .csv
             </button>
             <button disabled={!p} onClick={() => setPayOpen(true)}>5 · Record payments</button>
             <button disabled={!p} onClick={() => setReconcileOpen(true)}>5b · ⭱ Upload bank statement</button>
@@ -97,7 +101,8 @@ export default function Salary() {
           </div>
           <p className="small muted" style={{ marginBottom: 0, marginTop: 10 }}>
             Payable days = Present (P) + Training (T) + In Transit (TA). Leave (L) and Left (LE) are not
-            billed. Outstanding paid advances are pulled in automatically as a recovery.
+            billed. Outstanding paid advances are pulled in automatically as a recovery, then open
+            challans / debits out of what is left.
           </p>
         </Card>
       )}
@@ -119,7 +124,8 @@ export default function Salary() {
                   <th>Driver</th><th>Client ID</th><th>Location</th>
                   <th className="num">P</th><th className="num">T</th><th className="num">TA</th><th className="num">L</th>
                   <th className="num">Payable days</th><th className="num">Rate</th><th className="num">Gross</th>
-                  <th className="num">Advance</th><th className="num">Other</th><th className="num">Net</th>
+                  <th className="num">Advance</th><th className="num">Challan / debit</th>
+                  <th className="num">Other</th><th className="num">Net</th>
                   <th>Status</th><th className="right">Action</th>
                 </tr>
               </thead>
@@ -141,6 +147,7 @@ export default function Salary() {
                     <td className="num">{inr(r.rate_per_day)}</td>
                     <td className="num">{inr(r.gross)}</td>
                     <td className="num">{r.advance_deduction ? inr(r.advance_deduction) : '—'}</td>
+                    <td className="num">{r.debit_deduction ? inr(r.debit_deduction) : '—'}</td>
                     <td className="num">{r.other_deduction ? inr(r.other_deduction) : '—'}</td>
                     <td className="num"><b>{inr(r.net_payable)}</b></td>
                     <td>
@@ -163,6 +170,7 @@ export default function Salary() {
                     <td colSpan={9}><b>Totals</b></td>
                     <td className="num"><b>{inr(totals.gross)}</b></td>
                     <td className="num"><b>{inr(totals.advance)}</b></td>
+                    <td className="num"><b>{inr(totals.debit)}</b></td>
                     <td className="num"><b>{inr(totals.other)}</b></td>
                     <td className="num"><b>{inr(totals.net)}</b></td>
                     <td colSpan={2} className="small muted">excludes {totals.held} held</td>
@@ -210,6 +218,7 @@ function LineModal({ line, onClose, onDone }) {
     present_days: line.present_days, training_days: line.training_days,
     transit_days: line.transit_days, leave_days: line.leave_days,
     rate_per_day: line.rate_per_day, advance_deduction: line.advance_deduction,
+    debit_deduction: line.debit_deduction || 0,
     other_deduction: line.other_deduction, hold: !!line.hold, hold_reason: line.hold_reason || '',
   });
   const [busy, setBusy] = useState(false);
@@ -217,7 +226,7 @@ function LineModal({ line, onClose, onDone }) {
 
   const payable = Number(form.present_days) + Number(form.training_days) + Number(form.transit_days);
   const gross = payable * Number(form.rate_per_day);
-  const net = gross - Number(form.advance_deduction) - Number(form.other_deduction);
+  const net = gross - Number(form.advance_deduction) - Number(form.debit_deduction) - Number(form.other_deduction);
 
   async function submit() {
     setBusy(true);
@@ -243,9 +252,10 @@ function LineModal({ line, onClose, onDone }) {
         <Field label="In transit (TA)"><input type="number" value={form.transit_days} onChange={set('transit_days')} /></Field>
         <Field label="Leave (L)"><input type="number" value={form.leave_days} onChange={set('leave_days')} /></Field>
       </div>
-      <div className="grid c3">
+      <div className="grid c4">
         <Field label="Rate per day"><input type="number" value={form.rate_per_day} onChange={set('rate_per_day')} /></Field>
         <Field label="Advance recovery"><input type="number" value={form.advance_deduction} onChange={set('advance_deduction')} /></Field>
+        <Field label="Challan / debit recovery"><input type="number" value={form.debit_deduction} onChange={set('debit_deduction')} /></Field>
         <Field label="Other deduction"><input type="number" value={form.other_deduction} onChange={set('other_deduction')} /></Field>
       </div>
 

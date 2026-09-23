@@ -41,9 +41,9 @@ const between = (a, b) => a + Math.floor(rand() * (b - a + 1));
 function reset() {
   const tables = [
     'campaign_recipients', 'campaigns', 'tally_exports', 'payroll_lines', 'payroll_periods',
-    'petty_cash', 'expenses', 'advances', 'payment_batches', 'insurance', 'attendance',
+    'petty_cash', 'expenses', 'driver_debits', 'advances', 'payment_batches', 'insurance', 'attendance',
     'employments', 'screenings', 'driver_references', 'drivers', 'attachments',
-    'salary_components', 'salary_structures', 'app_settings',
+    'salary_components', 'salary_structures', 'app_settings', 'locations',
     'audit_log', 'counters', 'users',
   ];
   tables.forEach((t) => q.run(`DELETE FROM ${t}`));
@@ -366,6 +366,53 @@ function seedFinance(deployed, users) {
   });
 }
 
+/** The list deployments pick their location from. */
+function seedLocations() {
+  LOCATIONS.forEach((name) => q.run('INSERT INTO locations(name) VALUES (?)', name));
+}
+
+/** A few traffic challans and debits, some part-way through recovery. */
+function seedDebits(deployed, users) {
+  const active = deployed.filter((d) => !d.ended);
+  const now = today();
+  const items = [
+    ['challan', 'E-challan DL-TRF-2026-0{n} — jumping red light, vehicle {v}', 'Traffic violation', 1000],
+    ['challan', 'E-challan HR-GGM-88{n} — overspeeding on NH-48, vehicle {v}', 'Traffic violation', 2000],
+    ['debit', 'Rear bumper damage, vehicle {v} — workshop invoice W-3{n}', 'Vehicle damage while parking', 3500],
+    ['debit', 'Uniform set not returned', 'Company property not returned', 800],
+    ['challan', 'E-challan MH-MUM-5{n} — no parking, vehicle {v}', 'Traffic violation', 500],
+  ];
+  items.forEach(([kind, details, reason, amount], i) => {
+    const d = active[(i * 5 + 2) % active.length];
+    if (!d) return;
+    const n = between(100, 999);
+    q.run(
+      `INSERT INTO driver_debits(driver_id, employment_id, kind, details, debit_date, reason, amount,
+         recovered, status, approved_by, approved_at, created_by)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+      d.id, d.empId, kind, details.replace('{n}', n).replace('{v}', `DL01AB${n}4`),
+      addDays(now, -between(3, 25)), reason, amount, i === 2 ? 1500 : 0,
+      // The last one is still waiting on Admin / Director.
+      i === items.length - 1 ? 'pending_approval' : 'open',
+      i === items.length - 1 ? null : users.admin,
+      i === items.length - 1 ? null : `${now} 10:00:00`,
+      users.supervisor,
+    );
+  });
+}
+
+/** One driver who left is blacklisted, so the list has something in it. */
+function seedBlacklist(deployed, users) {
+  const left = deployed.find((d) => d.ended);
+  if (!left) return;
+  q.run(
+    `UPDATE drivers SET blacklisted = 1, blacklisted_on = ?, blacklist_reason = ?, blacklisted_by = ?
+     WHERE id = ?`,
+    addDays(left.leftOn, 2), 'Left without notice and did not return the vehicle keys', users.supervisor,
+    left.id,
+  );
+}
+
 function seedCampaign(users) {
   const id = q.insert(
     `INSERT INTO campaigns(title, body, audience, status, total, sent_count, created_by, sent_at)
@@ -392,12 +439,15 @@ console.log('Seeding Quantum Driver Management…');
 tx(() => {
   reset();
   const users = seedUsers();
+  seedLocations();
   const structures = seedSalaryMaster(users);
   const drivers = seedDrivers(users);
   const deployed = seedDeployments(drivers, users, structures);
   seedLsa(structures);
   seedAttendance(deployed, users);
   seedFinance(deployed, users);
+  seedDebits(deployed, users);
+  seedBlacklist(deployed, users);
   seedCampaign(users);
 
   console.log(`  users:       ${USERS.length}`);
@@ -406,6 +456,7 @@ tx(() => {
   console.log(`  deployments: ${deployed.length}`);
   console.log(`  advances:    ${q.scalar('SELECT count(*) FROM advances')}`);
   console.log(`  expenses:    ${q.scalar('SELECT count(*) FROM expenses')}`);
+  console.log(`  challans / debits: ${q.scalar('SELECT count(*) FROM driver_debits')}`);
   console.log(`  attendance:  ${q.scalar('SELECT count(*) FROM attendance')} exception marks`);
 });
 

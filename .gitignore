@@ -7,6 +7,8 @@ server/.env
 # Client registers dropped in for reference: real names, bank accounts, UANs
 /surat.csv
 /hzl_pay_register.csv
+# HDFC upload sheets from Finance: real names and bank accounts
 # OCR language packs are fetched at runtime, not committed
 *.traineddata
 *.traineddata.gz
+/RBI Adapter*.xls

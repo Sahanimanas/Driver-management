@@ -50,8 +50,11 @@ CREATE TABLE IF NOT EXISTS drivers (
   dl_dob            TEXT,                    -- DOB as printed on the DL
   dl_valid_from     TEXT,
   dl_valid_till     TEXT,
-  aadhar_doc_id     TEXT REFERENCES attachments(id),
-  dl_doc_id         TEXT REFERENCES attachments(id),
+  aadhar_doc_id     TEXT REFERENCES attachments(id),   -- Aadhar, front side
+  aadhar_back_doc_id TEXT REFERENCES attachments(id),  -- Aadhar, back side
+  dl_doc_id         TEXT REFERENCES attachments(id),   -- driving licence, front side
+  dl_back_doc_id    TEXT REFERENCES attachments(id),   -- driving licence, back side
+  bank_proof_doc_id TEXT REFERENCES attachments(id),   -- cancelled cheque or passbook page
   bank_account_name TEXT,
   bank_account_no   TEXT,
   bank_ifsc         TEXT,
@@ -61,6 +64,13 @@ CREATE TABLE IF NOT EXISTS drivers (
   referred_by       TEXT,                    -- name of the person who referred the driver
   rejection_reason  TEXT,                    -- captured when the client rejects the driver
   rejected_on       TEXT,
+  -- Blacklisting is a flag on top of the status, not a status of its own: a
+  -- blacklisted driver has still 'left', and the date they left is the one the
+  -- attendance sheet recorded (employments.date_of_leaving).
+  blacklisted       INTEGER NOT NULL DEFAULT 0,
+  blacklisted_on    TEXT,
+  blacklist_reason  TEXT,
+  blacklisted_by    INTEGER REFERENCES users(id),
   scan_id           TEXT REFERENCES attachments(id),  -- the client page this was captured from
   status            TEXT    NOT NULL DEFAULT 'registered'
                     CHECK (status IN ('registered','in_screening','cleared','deployed','left','rejected')),
@@ -178,6 +188,33 @@ CREATE TABLE IF NOT EXISTS advances (
 CREATE INDEX IF NOT EXISTS idx_adv_status ON advances(status);
 CREATE INDEX IF NOT EXISTS idx_adv_driver ON advances(driver_id);
 
+-- ------------------------------------------------------- challans / debits
+-- A traffic challan, damage or any other amount the driver owes the company.
+-- It is recovered through salary, after advances, and carried forward if one
+-- month's pay does not cover it.
+CREATE TABLE IF NOT EXISTS driver_debits (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  driver_id     INTEGER NOT NULL REFERENCES drivers(id),
+  employment_id INTEGER REFERENCES employments(id),
+  kind          TEXT    NOT NULL CHECK (kind IN ('challan','debit')),
+  details       TEXT    NOT NULL,          -- challan number, vehicle, issuing authority...
+  debit_date    TEXT    NOT NULL,
+  reason        TEXT    NOT NULL,
+  amount        REAL    NOT NULL CHECK (amount > 0),
+  recovered     REAL    NOT NULL DEFAULT 0,
+  -- Raised as pending_approval; only once Admin / Director approves it does it
+  -- become open and start being recovered from salary.
+  status        TEXT    NOT NULL DEFAULT 'pending_approval'
+                CHECK (status IN ('pending_approval','open','recovered','rejected','cancelled')),
+  cancel_reason TEXT,
+  approved_by   INTEGER REFERENCES users(id),
+  approved_at   TEXT,
+  approval_remarks TEXT,
+  created_by    INTEGER REFERENCES users(id),
+  created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_debits_driver ON driver_debits(driver_id);
+
 -- ----------------------------------------------------------- payment batches
 -- Requests are accumulated to the noon and the 18:30 cut-off, then paid either
 -- through internet banking (<= 4 requests) or by uploading a bank sheet (> 4).
@@ -274,6 +311,7 @@ CREATE TABLE IF NOT EXISTS payroll_lines (
   billing_json      TEXT,                        -- service charge, GST, invoice, TDS
   gross             REAL    NOT NULL DEFAULT 0,
   advance_deduction REAL    NOT NULL DEFAULT 0,
+  debit_deduction   REAL    NOT NULL DEFAULT 0,  -- challans / debits recovered this month
   other_deduction   REAL    NOT NULL DEFAULT 0,
   net_payable       REAL    NOT NULL DEFAULT 0,
   hold              INTEGER NOT NULL DEFAULT 0,
@@ -281,6 +319,7 @@ CREATE TABLE IF NOT EXISTS payroll_lines (
   paid_amount       REAL,
   paid_on           TEXT,
   utr               TEXT,
+  recovery_settled  INTEGER NOT NULL DEFAULT 0,  -- advance / debit recovery applied once paid
   status            TEXT    NOT NULL DEFAULT 'pending'
                     CHECK (status IN ('pending','held','in_bank','paid')),
   UNIQUE (period_id, employment_id)
@@ -393,6 +432,16 @@ CREATE TABLE IF NOT EXISTS app_settings (
   value      TEXT,
   updated_by INTEGER REFERENCES users(id),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- ---------------------------------------------------------------- locations
+-- The deployment sites, maintained by Admin / Director, so the location on a
+-- deployment is picked from a list rather than typed.
+CREATE TABLE IF NOT EXISTS locations (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  name       TEXT    NOT NULL UNIQUE COLLATE NOCASE,
+  active     INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
 -- ------------------------------------------------------------------ counters

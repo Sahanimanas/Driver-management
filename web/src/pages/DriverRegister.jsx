@@ -7,7 +7,7 @@ import { Card, Field, useAsync, useToast } from '../lib/ui.jsx';
 const BLANK = {
   name: '', phone: '', aadhar_no: '', address: '', dob_aadhar: '',
   dl_no: '', dl_dob: '', dl_valid_from: '', dl_valid_till: '',
-  bank_account_name: '', bank_account_no: '', bank_ifsc: '', bank_name: '', bank_branch: '', uan_no: '',
+  bank_account_name: '', bank_account_no: '', bank_ifsc: '', uan_no: '',
   referred_by: '', remarks: '',
 };
 
@@ -15,14 +15,16 @@ const BLANK = {
  * The registration form, field for field from the scope document:
  *
  *    1 Name*                       7 Driving License No, validity and DOB*
- *    2 Photo*                      8 Copy of Aadhar and DL upload*
+ *    2 Photo*                      8 Aadhar and DL, front and back*
  *    3 Phone number*               9 Reference contact numbers (two)*
  *    4 Aadhar Card Number*        10 Bank Account Details
  *    5 Address*                   11 UAN number
  *    6 Date of birth per Aadhar*  12 Name of person who referred the driver
  *
  * Starred fields are mandatory. 10 and 11 are not, because the scope allows
- * those two to be completed at the deployment step instead.
+ * those two to be completed at the deployment step instead. The bank section
+ * asks only for the account number, IFSC and holder's name, with a cancelled
+ * cheque or passbook page as proof; the bank's name follows from the IFSC.
  */
 const MANDATORY = [
   ['name', 'Name'],
@@ -128,6 +130,14 @@ function ageOn(iso) {
 
 const refPhoneError = (v) => (v ? VALIDATORS.phone(v) : null);
 
+/** Upload field, label, error when empty. */
+const DOC_SIDES = [
+  ['aadhar_doc', 'Aadhar — front', 'The front of the Aadhar is required'],
+  ['aadhar_back_doc', 'Aadhar — back', 'The back of the Aadhar is required'],
+  ['dl_doc', 'Licence — front', 'The front of the licence is required'],
+  ['dl_back_doc', 'Licence — back', 'The back of the licence is required'],
+];
+
 export default function DriverRegister() {
   const navigate = useNavigate();
   const toast = useToast();
@@ -148,8 +158,10 @@ export default function DriverRegister() {
   const missing = [
     ...MANDATORY.filter(([k]) => !String(form[k] || '').trim()).map(([, label]) => label),
     ...(files.photo ? [] : ['Photo']),
-    ...(files.aadhar_doc ? [] : ['Copy of Aadhar']),
-    ...(files.dl_doc ? [] : ['Copy of Driving License']),
+    ...(files.aadhar_doc ? [] : ['Aadhar (front)']),
+    ...(files.aadhar_back_doc ? [] : ['Aadhar (back)']),
+    ...(files.dl_doc ? [] : ['Driving License (front)']),
+    ...(files.dl_back_doc ? [] : ['Driving License (back)']),
     ...(refs.filter((r) => r.name && r.phone).length >= 2 ? [] : ['Two reference contacts']),
   ];
 
@@ -166,6 +178,10 @@ export default function DriverRegister() {
     if (err) errors[`ref${i}`] = err;
   });
   const errorCount = Object.keys(errors).length;
+
+  // Both sides of both documents are required outright -- an incomplete
+  // registration cannot skip them.
+  const sidesMissing = DOC_SIDES.filter(([k]) => !files[k]).map(([, label]) => label);
 
   // Show an error only once the field has been touched or a save attempted.
   const show = (k) => (touched[k] || touched.__submitted ? errors[k] : null);
@@ -216,14 +232,15 @@ export default function DriverRegister() {
         dob_mismatch_ack: dobAck || undefined,
         allow_incomplete: allowIncomplete || undefined,
       }));
-      ['photo', 'aadhar_doc', 'dl_doc'].forEach((k) => files[k] && fd.append(k, files[k]));
+      ['photo', 'aadhar_doc', 'aadhar_back_doc', 'dl_doc', 'dl_back_doc', 'bank_proof']
+        .forEach((k) => files[k] && fd.append(k, files[k]));
 
       const res = await api.upload('/drivers', fd);
       const short = res.completeness?.missing?.length;
       toast.success(short
         ? `Registered ${res.driver.name} — ${res.registration_no} (${short} field(s) still outstanding)`
         : `Registered ${res.driver.name} — ${res.registration_no}`);
-      navigate(`/drivers/${res.id}`);
+      navigate(`/drivers/${res.id}?registered=1`);
     } catch (err) {
       toast.error(err);
       if (err.details?.code === 'DUPLICATE_AADHAR' && err.details.driverId) {
@@ -239,7 +256,7 @@ export default function DriverRegister() {
   return (
     <Page
       title="Register driver"
-      subtitle="A registration number is allotted automatically on save"
+      subtitle="A unique registration ID is allotted automatically on save"
       actions={<>
         <button onClick={() => setScanOpen(true)}>📄 Scan registration page</button>
         <Link className="btn" to="/drivers">Cancel</Link>
@@ -352,18 +369,19 @@ export default function DriverRegister() {
               </div>
             </div>
 
-            <h4 style={{ marginTop: 16, marginBottom: 10, fontSize: 13 }}>Document copies</h4>
+            <h4 style={{ marginTop: 16, marginBottom: 4, fontSize: 13 }}>Document copies — both sides</h4>
+            <p className="small muted" style={{ marginTop: 0, marginBottom: 10 }}>
+              All four are required. Each takes an image or a PDF page; if one PDF holds both
+              sides, attach it to both the front and the back field.
+            </p>
             <div className="grid c2">
-              <Field label="Aadhar copy" required
-                error={touched.__submitted && !files.aadhar_doc ? 'A copy of the Aadhar is required' : null}>
-                <FileInput accept="image/*,application/pdf" file={files.aadhar_doc}
-                  onChange={(f) => setFiles((c) => ({ ...c, aadhar_doc: f }))} />
-              </Field>
-              <Field label="Licence copy" required
-                error={touched.__submitted && !files.dl_doc ? 'A copy of the licence is required' : null}>
-                <FileInput accept="image/*,application/pdf" file={files.dl_doc}
-                  onChange={(f) => setFiles((c) => ({ ...c, dl_doc: f }))} />
-              </Field>
+              {DOC_SIDES.map(([k, label, err]) => (
+                <Field key={k} label={label} required
+                  error={touched.__submitted && !files[k] ? err : null}>
+                  <FileInput accept="image/*,application/pdf" file={files[k]}
+                    onChange={(f) => setFiles((c) => ({ ...c, [k]: f }))} />
+                </Field>
+              ))}
             </div>
           </Card>
 
@@ -373,8 +391,9 @@ export default function DriverRegister() {
               Not mandatory here — these may instead be completed at the deployment step. They are
               needed before the driver can be paid an advance or a salary.
             </p>
-            <Field label="Account holder name" hint="leave blank to use the driver's name">
-              <input value={form.bank_account_name} onChange={set('bank_account_name')} maxLength={80} />
+            <Field label="Account holder name" hint="as printed on the cheque or passbook">
+              <input value={form.bank_account_name} onChange={set('bank_account_name')} maxLength={80}
+                placeholder={form.name || 'Leave blank to use the driver’s name'} />
             </Field>
             <div className="grid c2">
               <div className={`field-wrap${flag('bank_account_no')}`}>
@@ -395,16 +414,10 @@ export default function DriverRegister() {
                 </Field>
               </div>
             </div>
-            <div className={`field-wrap${flag('bank_name')}`}>
-              <Field label="Bank name">
-                <input value={form.bank_name} onChange={set('bank_name')} maxLength={60} />
-              </Field>
-            </div>
-            <div className="field-wrap">
-              <Field label="Bank branch" hint="shown on the HZL pay register">
-                <input value={form.bank_branch} onChange={set('bank_branch')} maxLength={60} />
-              </Field>
-            </div>
+            <Field label="Cancelled cheque or passbook" hint="the page showing the account number and IFSC">
+              <FileInput accept="image/*,application/pdf" file={files.bank_proof}
+                onChange={(f) => setFiles((c) => ({ ...c, bank_proof: f }))} />
+            </Field>
             <div className={`field-wrap${flag('uan_no')}`}>
               <Field label="UAN number" hint="12 digits" error={show('uan_no')}>
                 <input value={form.uan_no} onChange={setDigits('uan_no', 12)}
@@ -473,6 +486,10 @@ export default function DriverRegister() {
                 These are the mandatory fields of the registration form. If one genuinely cannot be
                 obtained today, tick below — the driver is saved as an incomplete registration and the
                 gap stays visible on their profile.
+                {sidesMissing.length > 0 && (
+                  <> <b>Both sides of the Aadhar and the licence cannot be skipped</b> — upload
+                  them before saving.</>
+                )}
               </div>
               <label className="check" style={{ marginTop: 6 }}>
                 <input type="checkbox" checked={allowIncomplete}
@@ -486,7 +503,7 @@ export default function DriverRegister() {
         <div className="banner info">
           <span>ℹ</span>
           <div>
-            On save the driver is allotted a registration number and enters the screening pipeline —
+            On save the driver is allotted a unique registration ID and enters the screening pipeline —
             trial test, safety orientation and medical. Only after all three are passed can the client
             issue a six digit ID and the driver be deployed. Bank details and the UAN may instead be
             completed at the deployment step.
@@ -496,6 +513,7 @@ export default function DriverRegister() {
         <div className="row">
           <button className="primary"
             disabled={busy || errorCount > 0 || (dobMismatch && !dobAck)
+              || sidesMissing.length > 0
               || (missing.length > 0 && !allowIncomplete)}>
             {busy ? <span className="spinner" /> : 'Register driver'}
           </button>

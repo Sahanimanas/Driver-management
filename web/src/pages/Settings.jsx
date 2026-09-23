@@ -137,6 +137,8 @@ export default function Settings() {
         </div>
       </Card>
 
+      <Locations />
+
       <Card title="Roles">
         <table className="tbl">
           <tbody>
@@ -162,6 +164,11 @@ export default function Settings() {
               <td>Advance run paid by internet banking up to</td>
               <td><b>{rules?.netbankingMaxRequests} requests</b>
                 <span className="muted small"> — beyond that a bank upload sheet is generated</span></td>
+            </tr>
+            <tr>
+              <td>Advances in a month may not exceed</td>
+              <td><b>{rules?.advanceLimitPercent}%</b>
+                <span className="muted small"> of the salary earned on the attendance so far</span></td>
             </tr>
             <tr>
               <td>Advance accumulation cut-offs</td>
@@ -197,5 +204,88 @@ export default function Settings() {
         </div>
       </Card>
     </Page>
+  );
+}
+
+/**
+ * The deployment locations. A deployment picks its location from this list,
+ * so a site is spelt one way everywhere. A site that is no longer used is
+ * retired rather than deleted, because old deployments still name it.
+ */
+function Locations() {
+  const toast = useToast();
+  const { data, error, reload } = useAsync(() => api.get('/locations?all=true'), []);
+  const [name, setName] = useState('');
+  const [editing, setEditing] = useState(null);
+
+  async function run(fn, message) {
+    try {
+      await fn();
+      toast.success(message);
+      reload();
+      return true;
+    } catch (err) {
+      toast.error(err);
+      return false;
+    }
+  }
+
+  return (
+    <Card title="Locations of deployment">
+      <ErrorBanner error={error} onRetry={reload} />
+      <form className="row wrap" style={{ marginBottom: 12 }} onSubmit={(e) => {
+        e.preventDefault();
+        run(() => api.post('/locations', { name }), `${name.trim()} added`).then((done) => done && setName(''));
+      }}>
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Udaipur — Zawar Mines"
+          maxLength={60} style={{ flex: 1, minWidth: 240 }} />
+        <button className="primary" disabled={name.trim().length < 2}>+ Add location</button>
+      </form>
+      {!data ? (error ? null : <Loading what="locations" />) : (
+        <table className="tbl">
+          <thead><tr><th>Location</th><th className="num">Deployed now</th><th>Status</th><th /></tr></thead>
+          <tbody>
+            {data.length === 0 && (
+              <tr><td colSpan={4} className="empty">
+                No locations yet — until one is added, the deployment screen takes any location typed in.
+              </td></tr>
+            )}
+            {data.map((l) => (
+              <tr key={l.id}>
+                <td>
+                  {editing?.id === l.id ? (
+                    <input value={editing.name} autoFocus maxLength={60}
+                      onChange={(e) => setEditing({ ...editing, name: e.target.value })} />
+                  ) : <b>{l.name}</b>}
+                </td>
+                <td className="num">{l.deployed}</td>
+                <td>{l.active ? <span className="chip green">in use</span> : <span className="chip grey">retired</span>}</td>
+                <td className="right nowrap">
+                  {editing?.id === l.id ? (
+                    <>
+                      <button className="sm primary" onClick={() => run(
+                        () => api.patch(`/locations/${l.id}`, { name: editing.name }), 'Location renamed',
+                      ).then((done) => done && setEditing(null))}>Save</button>{' '}
+                      <button className="sm" onClick={() => setEditing(null)}>Cancel</button>
+                    </>
+                  ) : (
+                    <>
+                      <button className="sm" onClick={() => setEditing({ id: l.id, name: l.name })}>Rename</button>{' '}
+                      <button className="sm" onClick={() => run(
+                        () => api.patch(`/locations/${l.id}`, { active: !l.active }),
+                        l.active ? `${l.name} retired` : `${l.name} back in use`,
+                      )}>{l.active ? 'Retire' : 'Restore'}</button>
+                    </>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      <div className="muted small" style={{ marginTop: 10 }}>
+        Renaming a location renames it on the drivers deployed there too.
+      </div>
+    </Card>
   );
 }

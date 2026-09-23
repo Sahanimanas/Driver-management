@@ -60,6 +60,7 @@ router.get(
         netbankingMaxRequests: config.rules.netbankingMaxRequests,
         cutoffs: config.rules.cutoffs,
         payableCodes: config.rules.payableCodes,
+        advanceLimitPercent: config.rules.advanceLimitPercent,
       },
       whatsapp: { enabled: config.whatsapp.enabled },
     });
@@ -117,6 +118,83 @@ router.delete(
     set('logo_attachment_id', null, req.user.id);
     audit(req.user.id, 'settings', 'branding', 'logo_removed');
     res.json(branding());
+  }),
+);
+
+// ---------------------------------------------------------------- locations
+/**
+ * The deployment sites. Deployments pick their location from this list, so a
+ * site is spelt one way everywhere -- attendance filters, broadcasts and the
+ * registers all group by it.
+ */
+export function checkLocation(value) {
+  const name = String(value ?? '').trim();
+  if (!name) return null;
+  const active = q.all('SELECT name FROM locations WHERE active = 1');
+  // Until the list has been set up, any location is accepted.
+  if (!active.length) return name;
+  const hit = active.find((l) => l.name.toLowerCase() === name.toLowerCase());
+  if (!hit) {
+    throw bad(`"${name}" is not on the list of locations. Pick one from the list, or ask `
+      + 'Admin / Director to add it in Settings.', { code: 'UNKNOWN_LOCATION' });
+  }
+  return hit.name;
+}
+
+router.get(
+  '/locations',
+  authenticate,
+  h(async (req, res) => {
+    const all = req.query.all === 'true';
+    res.json(q.all(
+      `SELECT l.*, (SELECT count(*) FROM employments e
+                     WHERE e.location = l.name AND e.status = 'active') AS deployed
+         FROM locations l ${all ? '' : 'WHERE l.active = 1'} ORDER BY l.name`,
+    ));
+  }),
+);
+
+router.post(
+  '/locations',
+  authenticate,
+  allow('admin'),
+  h(async (req, res) => {
+    const name = String(req.body.name || '').trim().replace(/\s+/g, ' ');
+    if (name.length < 2 || name.length > 60) throw bad('A location name is 2 to 60 characters');
+    const existing = q.get('SELECT * FROM locations WHERE name = ? COLLATE NOCASE', name);
+    if (existing?.active) throw bad(`${existing.name} is already on the list`);
+    if (existing) {
+      q.run('UPDATE locations SET active = 1 WHERE id = ?', existing.id);
+    } else {
+      q.insert('INSERT INTO locations(name) VALUES (?)', name);
+    }
+    audit(req.user.id, 'settings', 'locations', 'location_added', { name });
+    res.status(201).json(q.get('SELECT * FROM locations WHERE name = ? COLLATE NOCASE', name));
+  }),
+);
+
+/** Rename, or retire a site. Retired sites stay on old deployments. */
+router.patch(
+  '/locations/:id',
+  authenticate,
+  allow('admin'),
+  h(async (req, res) => {
+    const loc = q.get('SELECT * FROM locations WHERE id = ?', Number(req.params.id));
+    if (!loc) throw bad('Location not found');
+    if (req.body.active !== undefined) {
+      q.run('UPDATE locations SET active = ? WHERE id = ?', req.body.active ? 1 : 0, loc.id);
+    }
+    if (req.body.name !== undefined) {
+      const name = String(req.body.name).trim().replace(/\s+/g, ' ');
+      if (name.length < 2 || name.length > 60) throw bad('A location name is 2 to 60 characters');
+      const clash = q.get('SELECT id FROM locations WHERE name = ? COLLATE NOCASE AND id <> ?', name, loc.id);
+      if (clash) throw bad(`${name} is already on the list`);
+      // A rename carries the live deployments with it.
+      q.run('UPDATE locations SET name = ? WHERE id = ?', name, loc.id);
+      q.run('UPDATE employments SET location = ? WHERE location = ?', name, loc.name);
+    }
+    audit(req.user.id, 'settings', 'locations', 'location_updated', { id: loc.id, ...req.body });
+    res.json(q.get('SELECT * FROM locations WHERE id = ?', loc.id));
   }),
 );
 

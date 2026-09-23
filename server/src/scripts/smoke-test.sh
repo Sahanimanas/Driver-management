@@ -21,6 +21,11 @@ TMP="${TMPDIR:-/tmp}/quantum-smoke.$$"
 mkdir -p "$TMP"
 trap 'rm -rf "$TMP"' EXIT
 
+# A one-page PDF standing in for each side of the Aadhar and the licence,
+# which a registration can no longer be saved without.
+printf '%%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%%%EOF\n' > "$TMP/side.pdf"
+SIDES_F=(-F "aadhar_doc=@$TMP/side.pdf" -F "aadhar_back_doc=@$TMP/side.pdf" -F "dl_doc=@$TMP/side.pdf" -F "dl_back_doc=@$TMP/side.pdf")
+
 SUP=$(login supervisor@quantum.test)
 ADM=$(login director@quantum.test)
 ADM2=$(login admin@quantum.test)
@@ -117,7 +122,7 @@ INC=$(curl -s -X POST "$API/drivers" -H "Authorization: Bearer $SUP" -F "payload
   | node -pe 'JSON.parse(require("fs").readFileSync(0)).details?.code||""')
 [ "$INC" = "INCOMPLETE_REGISTRATION" ] && ok "starred fields are enforced" || bad "mandatory fields" "got $INC"
 
-REG=$(curl -s -X POST "$API/drivers" -H "Authorization: Bearer $SUP" \
+REG=$(curl -s -X POST "$API/drivers" -H "Authorization: Bearer $SUP" "${SIDES_F[@]}" \
   -F "payload={\"name\":\"Test Driver\",\"phone\":\"9812345670\",\"aadhar_no\":\"$AAD\",\"referred_by\":\"Ramesh Yadav\",\"allow_incomplete\":true}")
 RB=$(echo "$REG" | node -pe 'JSON.parse(require("fs").readFileSync(0)).driver.referred_by')
 [ "$RB" = "Ramesh Yadav" ] && ok "referred_by is captured" || bad "referred_by" "got $RB"
@@ -227,6 +232,127 @@ SN=$(echo "$SCAN" | node -pe 'JSON.parse(require("fs").readFileSync(0)).fields.n
 [ "$SN" = "RAJU SINGH" ] && ok "pasted page text populates the form" || bad "scan text" "got $SN"
 OCRL=$(curl -s "$API/drivers/scan/status" -H "Authorization: Bearer $SUP" | node -pe 'String(JSON.parse(require("fs").readFileSync(0)).local)')
 [ "$OCRL" = "true" ] && ok "local OCR engine reported available" || bad "ocr status" "got $OCRL"
+
+j() { node -pe "const d=JSON.parse(require('fs').readFileSync(0)); $1"; }
+TODAY=$(date +%Y-%m-%d)
+
+echo "== registration: both sides of the documents, bank from the IFSC =="
+AAD4="9$(date +%H%M%S)$(printf %05d $((RANDOM % 100000)))"
+P4="{\"name\":\"Side Check\",\"phone\":\"9811122233\",\"aadhar_no\":\"$AAD4\",\"bank_ifsc\":\"HDFC0001234\",\"bank_account_no\":\"50100123456789\",\"bank_account_name\":\"Side Check\",\"allow_incomplete\":true}"
+SIDES=$(curl -s -X POST "$API/drivers" -H "Authorization: Bearer $SUP" \
+  -F "aadhar_doc=@$TMP/side.pdf" -F "dl_doc=@$TMP/side.pdf" -F "payload=$P4" \
+  | j '`${d.details?.code}|${(d.details?.missing||[]).join()}`')
+[ "$SIDES" = "DOCUMENT_SIDES_REQUIRED|Aadhar (back),Driving License (back)" ] \
+  && ok "both sides of Aadhar and licence are required, even on an incomplete registration" || bad "document sides" "got $SIDES"
+R4=$(curl -s -X POST "$API/drivers" -H "Authorization: Bearer $SUP" "${SIDES_F[@]}" -F "payload=$P4")
+BANKN=$(echo "$R4" | j 'd.driver.bank_name')
+[ "$BANKN" = "HDFC Bank" ] && ok "bank name is read off the IFSC ($BANKN)" || bad "bank from IFSC" "got $BANKN"
+PROOF=$(echo "$R4" | j 'String(d.completeness.deferred.includes("Cancelled cheque or passbook"))')
+[ "$PROOF" = "true" ] && ok "a missing cheque / passbook is reported" || bad "bank proof" "got $PROOF"
+BID=$(echo "$R4" | j 'd.id')
+REGNO=$(echo "$R4" | j 'd.registration_no')
+case "$REGNO" in QDM/*) ok "registration ID allotted on save ($REGNO)" ;; *) bad "registration ID" "got $REGNO" ;; esac
+
+echo "== deployment: not-deployed list, locations, blacklist =="
+UND=$(curl -s "$API/deployments/undeployed" -H "Authorization: Bearer $SUP" | j "String(d.some((r) => r.id === $BID))")
+[ "$UND" = "true" ] && ok "a new registration is on the not-deployed list" || bad "undeployed list" "got $UND"
+CID2="8$(printf %05d $((RANDOM % 100000)))"
+LOCBAD=$(curl -s -X POST "$API/deployments" -H "Authorization: Bearer $SUP" -H 'Content-Type: application/json' \
+  -d "{\"driver_id\":$BID,\"client_id\":\"$CID2\",\"date_of_joining\":\"$TODAY\",\"override_screening\":true,\"salary_structure_id\":$SID,\"location\":\"Nowhere Town\"}" \
+  | j 'd.details?.code||d.error')
+[ "$LOCBAD" = "UNKNOWN_LOCATION" ] && ok "a location off the list is refused" || bad "location list" "got $LOCBAD"
+BL=$(curl -s -X POST "$API/drivers/$BID/blacklist" -H "Authorization: Bearer $SUP" -H 'Content-Type: application/json' \
+  -d '{"reason":"Smoke test blacklist"}' | j 'String(d.blacklisted)')
+[ "$BL" = "1" ] && ok "a driver can be blacklisted" || bad "blacklist" "got $BL"
+LOC1="Smoke Site $RANDOM"
+LOCADD=$(curl -s -X POST "$API/locations" -H "Authorization: Bearer $ADM" -H 'Content-Type: application/json'   -d "{\"name\":\"$LOC1\"}" | j 'd.name||d.error')
+[ "$LOCADD" = "$LOC1" ] && ok "Admin / Director adds a location to the list" || bad "add location" "got $LOCADD"
+BLD=$(curl -s -X POST "$API/deployments" -H "Authorization: Bearer $SUP" -H 'Content-Type: application/json' \
+  -d "{\"driver_id\":$BID,\"client_id\":\"$CID2\",\"date_of_joining\":\"$TODAY\",\"override_screening\":true,\"salary_structure_id\":$SID,\"location\":\"$LOC1\"}" \
+  | j 'd.details?.code||d.error')
+[ "$BLD" = "BLACKLISTED" ] && ok "a blacklisted driver cannot be deployed" || bad "blacklist deploy guard" "got $BLD"
+INBL=$(curl -s "$API/deployments/blacklisted" -H "Authorization: Bearer $SUP" | j "String(d.some((r) => r.id === $BID))")
+NOTUND=$(curl -s "$API/deployments/undeployed" -H "Authorization: Bearer $SUP" | j "String(d.some((r) => r.id === $BID))")
+[ "$INBL|$NOTUND" = "true|false" ] && ok "blacklisted drivers are listed apart from the not-deployed" || bad "blacklist lists" "got $INBL|$NOTUND"
+LIFTSUP=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$API/drivers/$BID/blacklist/lift" -H "Authorization: Bearer $SUP" \
+  -H 'Content-Type: application/json' -d '{"reason":"try"}')
+[ "$LIFTSUP" = "403" ] && ok "a supervisor cannot lift a blacklist (403)" || bad "lift guard" "got $LIFTSUP"
+LIFT=$(curl -s -X POST "$API/drivers/$BID/blacklist/lift" -H "Authorization: Bearer $ADM" -H 'Content-Type: application/json' \
+  -d '{"reason":"Smoke test lift"}' | j 'String(d.blacklisted)')
+[ "$LIFT" = "0" ] && ok "Admin / Director lifts the blacklist" || bad "lift" "got $LIFT"
+DEPL=$(curl -s -X POST "$API/deployments" -H "Authorization: Bearer $SUP" -H 'Content-Type: application/json' \
+  -d "{\"driver_id\":$BID,\"client_id\":\"$CID2\",\"date_of_joining\":\"$TODAY\",\"override_screening\":true,\"salary_structure_id\":$SID,\"location\":\"$LOC1\"}")
+EMP2=$(echo "$DEPL" | j 'd.employment?.id||""')
+END=$(curl -s -X POST "$API/deployments/$EMP2/end" -H "Authorization: Bearer $SUP" -H 'Content-Type: application/json' \
+  -d "{\"date_of_leaving\":\"$TODAY\",\"exit_reason\":\"Absconded\",\"blacklist\":true,\"blacklist_reason\":\"Absconded with the vehicle\"}" \
+  | j 'd.employment?.status||d.error')
+BLDOL=$(curl -s "$API/deployments/blacklisted" -H "Authorization: Bearer $SUP" | j "(d.find((r) => r.id === $BID)||{}).date_of_leaving||''")
+[ "$END|$BLDOL" = "ended|$TODAY" ] && ok "ending a deployment can blacklist, with the date of leaving on the list" || bad "end + blacklist" "got $END|$BLDOL"
+
+echo "== challans / debits: approved by Admin / Director, then recovered through salary =="
+DEBR=$(curl -s -X POST "$API/debits" -H "Authorization: Bearer $SUP" -H 'Content-Type: application/json' \
+  -d "{\"driver_id\":$DRV,\"kind\":\"challan\",\"details\":\"E-challan TEST-001\",\"debit_date\":\"$TODAY\",\"reason\":\"Red light\",\"amount\":750}")
+DEB=$(echo "$DEBR" | j 'd.status||d.error')
+DEBID=$(echo "$DEBR" | j 'd.id')
+[ "$DEB" = "pending_approval" ] && ok "a challan is raised and waits for approval" || bad "raise challan" "got $DEB"
+DSUP=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$API/debits/$DEBID/decision" -H "Authorization: Bearer $SUP" \
+  -H 'Content-Type: application/json' -d '{"decision":"approve"}')
+[ "$DSUP" = "403" ] && ok "a supervisor cannot approve a challan (403)" || bad "challan approval guard" "got $DSUP"
+DAPP=$(curl -s -X POST "$API/debits/$DEBID/decision" -H "Authorization: Bearer $ADM" -H 'Content-Type: application/json' \
+  -d '{"decision":"approve"}' | j 'd.status||d.error')
+[ "$DAPP" = "open" ] && ok "Admin / Director approves it and it opens for recovery" || bad "approve challan" "got $DAPP"
+curl -s -X POST "$API/salary/periods/$PERIOD/collate" -H "Authorization: Bearer $FIN" -H 'Content-Type: application/json' -d '{}' >/dev/null
+DDED=$(curl -s "$API/salary/periods/$PERIOD" -H "Authorization: Bearer $FIN" | j "String((d.rows.find((r) => r.driver_id === $DRV)||{}).debit_deduction >= 750)")
+[ "$DDED" = "true" ] && ok "collating the month deducts the open challans" || bad "debit deduction" "got $DDED"
+
+echo "== advances: the ceiling on attendance =="
+BIG=$(curl -s -X POST "$API/advances" -H "Authorization: Bearer $SUP" -H 'Content-Type: application/json' \
+  -d "{\"driver_id\":$DRV,\"amount\":400000,\"reason\":\"Ceiling check\"}" | j 'd.advance.id')
+CAP=$(curl -s -X POST "$API/advances/$BIG/decision" -H "Authorization: Bearer $ADM" -H 'Content-Type: application/json' \
+  -d '{"decision":"approve"}' | j 'd.details?.code||d.status')
+[ "$CAP" = "ADVANCE_LIMIT" ] && ok "an advance past 50% of earned salary cannot be approved" || bad "advance ceiling" "got $CAP"
+LIM=$(curl -s "$API/advances/$BIG/context" -H "Authorization: Bearer $ADM" | j '`${d.limitPercent}|${d.advanceLimit === Math.round(d.accruedSalary * 50) / 100}`')
+[ "$LIM" = "50|true" ] && ok "the approval window shows the 50% limit" || bad "limit in context" "got $LIM"
+curl -s -X POST "$API/advances/$BIG/cancel" -H "Authorization: Bearer $SUP" -H 'Content-Type: application/json' -d '{}' >/dev/null
+
+echo "== advances: HDFC bulk sheet for the day =="
+DS=$(curl -s -X POST "$API/advances/day-sheet" -H "Authorization: Bearer $FIN" -H 'Content-Type: application/json' -d '{}')
+DSB=$(echo "$DS" | j 'd.batch?.id||d.error')
+curl -s "$API/advances/batches/$DSB/sheet?format=csv" -H "Authorization: Bearer $FIN" -o "$TMP/hdfc.csv"
+FIRST=$(head -c 2 "$TMP/hdfc.csv")
+case "$FIRST" in I,|N,|R,) ok "the day's advances come out as an HDFC bulk upload ($(echo "$DS" | j 'd.count') payment(s))" ;;
+  *) bad "hdfc day sheet" "batch $DSB, first field '$FIRST'" ;; esac
+curl -s "$API/advances/batches/$DSB/sheet" -H "Authorization: Bearer $FIN" -o "$TMP/hdfc.xlsx"
+HHEAD=$(node -e '
+  const E = require("exceljs"); const wb = new E.Workbook();
+  wb.xlsx.readFile(process.argv[1]).then(() => {
+    const ws = wb.worksheets[0]; const h = ws.getRow(1); const r = ws.getRow(2);
+    console.log([ws.name, String(h.getCell(1).value).slice(0, 19), h.getCell(28).value, ws.columnCount,
+      r.values.length ? [r.getCell(1).value, typeof r.getCell(3).value, typeof r.getCell(4).value,
+        r.getCell(14).value, /^\d\d\/\d\d\/\d{4}$/.test(r.getCell(23).value)].join("/") : "empty"].join("|"));
+  }).catch(() => console.log(""));' "$TMP/hdfc.xlsx")
+case "$HHEAD" in "Sheet1|Transaction Type (N|Beneficiary email id|28|"*) ok "the .xlsx matches the RBI Adapter layout (28 columns, Sheet1)" ;;
+  *) bad "hdfc xlsx layout" "got $HHEAD" ;; esac
+case "$HHEAD" in *"|empty"|*"|N/string/number/VENDOR/true"|*"|R/string/number/VENDOR/true") ok "rows carry N/R, text account, numeric amount, VENDOR, DD/MM/YYYY" ;;
+  *) bad "hdfc xlsx row" "got $HHEAD" ;; esac
+
+echo "== salary: recovery is applied once =="
+LINES=$(curl -s "$API/salary/periods/$PERIOD" -H "Authorization: Bearer $FIN" \
+  | j 'd.rows.filter((r) => r.advance_deduction > 0 && r.status !== "paid" && !r.hold).slice(0, 2).map((r) => `${r.id}:${r.driver_id}`).join(" ")')
+set -- $LINES
+if [ $# -eq 2 ]; then
+  LA=${1%%:*}; DA=${1##*:}; LB=${2%%:*}
+  recov() { curl -s "$API/advances?driver_id=$1" -H "Authorization: Bearer $FIN" | j 'd.rows.reduce((s, r) => s + r.recovered, 0)'; }
+  curl -s -X POST "$API/salary/periods/$PERIOD/record-payments" -H "Authorization: Bearer $FIN" -H 'Content-Type: application/json' \
+    -d "{\"payments\":[{\"line_id\":$LA}]}" >/dev/null
+  R1=$(recov $DA)
+  curl -s -X POST "$API/salary/periods/$PERIOD/record-payments" -H "Authorization: Bearer $FIN" -H 'Content-Type: application/json' \
+    -d "{\"payments\":[{\"line_id\":$LB}]}" >/dev/null
+  R2=$(recov $DA)
+  [ "$R1" = "$R2" ] && ok "paying a second batch does not recover the first again ($R1)" || bad "recovery idempotency" "$R1 then $R2"
+else
+  bad "recovery idempotency" "needs two lines with an advance recovery, found: $LINES"
+fi
 
 echo
 echo "  $PASS passed, $FAIL failed"
