@@ -186,7 +186,7 @@ export default function Settings() {
               <td>Approval chain</td>
               <td>
                 Supervisor raises → <b>Admin / Director</b> approves → <b>Finance</b> pays.
-                <span className="muted small"> Nobody can approve a request they raised.</span>
+                <span className="muted small"> An approver may also approve a request they raised.</span>
               </td>
             </tr>
             <tr>

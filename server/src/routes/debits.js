@@ -75,8 +75,8 @@ router.get(
       ...r,
       canCancel: ['pending_approval', 'open'].includes(r.status) && r.recovered === 0
         && (r.created_by === req.user.id || can(req.user, 'debits.approve')),
-      canDecide: r.status === 'pending_approval' && can(req.user, 'debits.approve')
-        && r.created_by !== req.user.id,
+      // The approver may approve one they raised themselves.
+      canDecide: r.status === 'pending_approval' && can(req.user, 'debits.approve'),
     }));
     res.json({
       rows,
@@ -123,8 +123,8 @@ router.post(
 );
 
 /**
- * Approve / reject -- whoever holds the approval permission, but not on one
- * they raised themselves. Approved, it is open and recovered from the next salary.
+ * Approve / reject -- whoever holds the approval permission, including on one
+ * they raised. Approved, it is open and recovered from the next salary.
  */
 router.post(
   '/:id/decision',
@@ -134,9 +134,6 @@ router.post(
     if (!row) throw notFound('Challan / debit not found');
     if (!['approve', 'reject'].includes(req.body.decision)) throw bad('decision must be approve or reject');
     if (row.status !== 'pending_approval') throw bad(`This challan / debit is already ${row.status}`);
-    if (row.created_by === req.user.id) {
-      throw forbidden('You cannot approve one you raised yourself — another Admin / Director must action it');
-    }
     const approve = req.body.decision === 'approve';
     const remarks = String(req.body.remarks || '').trim() || null;
     if (!approve && !remarks) throw bad('Record why it is being rejected');

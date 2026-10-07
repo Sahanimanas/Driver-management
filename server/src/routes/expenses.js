@@ -48,9 +48,8 @@ const withExtras = (row, user) => ({
     String(row.id),
   ),
   actions: {
-    // The approver approves every request, but never one they raised.
-    canApprove:
-      row.status === 'pending_approval' && can(user, 'expenses.approve') && row.requested_by !== user.id,
+    // The approver may approve a request they raised themselves.
+    canApprove: row.status === 'pending_approval' && can(user, 'expenses.approve'),
     // Under the threshold the supervisor pays out of petty cash and uploads the
     // supporting; at or above it Finance pays the vendor directly.
     canSettle:
@@ -200,7 +199,7 @@ router.post(
 );
 
 /**
- * Approve / reject -- whoever holds the approval permission, but not on a
+ * Approve / reject -- whoever holds the approval permission, including on a
  * request they raised. The threshold then
  * decides the settlement route -- below it the supervisor pays from petty cash,
  * at or above it Finance pays the vendor directly.
@@ -217,11 +216,6 @@ router.post(
 
     if (x.status !== 'pending_approval') {
       throw bad(`This request is ${x.status} and cannot be actioned`);
-    }
-    if (x.requested_by === req.user.id) {
-      throw forbidden(
-        'You cannot approve a request you raised yourself — another Admin / Director must action it',
-      );
     }
 
     q.run(

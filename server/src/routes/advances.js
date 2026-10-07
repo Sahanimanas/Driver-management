@@ -43,9 +43,8 @@ function advanceScope(user) {
 /** What this user can act on right now. */
 function actionsFor(user, adv) {
   return {
-    // The approver, but never of a request they raised.
-    canApprove:
-      adv.status === 'pending_approval' && can(user, 'advances.approve') && adv.requested_by !== user.id,
+    // The approver may approve a request they raised themselves.
+    canApprove: adv.status === 'pending_approval' && can(user, 'advances.approve'),
     canPay: adv.status === 'approved' && can(user, 'advances.pay'),
     canCancel:
       adv.status === 'pending_approval' && (adv.requested_by === user.id || can(user, 'advances.approve')),
@@ -295,7 +294,7 @@ router.post(
   }),
 );
 
-/** Approve / reject. Whoever holds the approval permission, but never on their own request. */
+/** Approve / reject. Whoever holds the approval permission -- including on their own request. */
 router.post(
   '/:id/decision',
   allow('advances.approve'),
@@ -308,11 +307,6 @@ router.post(
 
     if (adv.status !== 'pending_approval') {
       throw bad(`This request is ${adv.status} and cannot be actioned`);
-    }
-    if (adv.requested_by === req.user.id) {
-      throw forbidden(
-        'You cannot approve a request you raised yourself — another Admin / Director must action it',
-      );
     }
 
     // An approver may sign off a different figure to the one asked for -- the
@@ -396,6 +390,54 @@ router.post(
 );
 
 // ------------------------------------------------------------------ payment
+/**
+ * Mark one approved advance paid, in one step: Finance has paid it through
+ * internet banking and records the date and the UTR. An advance not yet in a
+ * payment run gets a run of its own, so the past-runs list and Tally see it
+ * like any other; one already in an open run is ticked off inside it, and the
+ * run closes once everything in it is paid.
+ */
+router.post(
+  '/:id/pay',
+  allow('advances.pay'),
+  h(async (req, res) => {
+    const adv = q.get('SELECT * FROM advances WHERE id = ?', Number(req.params.id));
+    if (!adv) throw notFound('Advance request not found');
+    if (adv.status !== 'approved') {
+      throw bad(`This request is ${adv.status.replace('_', ' ')} — only an approved advance can be marked paid`);
+    }
+    const paidOn = req.body.paid_at || today();
+    if (!isDate(paidOn)) throw bad('paid_at must be YYYY-MM-DD');
+    if (paidOn > today()) throw bad('The payment date cannot be in the future');
+    const utr = String(req.body.utr || '').trim() || null;
+
+    tx(() => {
+      let batchId = adv.batch_id;
+      if (!batchId) {
+        batchId = q.insert(
+          `INSERT INTO payment_batches(kind, batch_date, cutoff, method, item_count, total_amount, created_by)
+           VALUES ('advance', ?, ?, 'netbanking', 1, ?, ?)`,
+          paidOn, adv.cutoff || 'EVENING', adv.amount, req.user.id,
+        );
+      }
+      q.run(
+        "UPDATE advances SET status = 'paid', paid_at = ?, utr = ?, batch_id = ? WHERE id = ?",
+        paidOn, utr, batchId, adv.id,
+      );
+      const unpaid = Number(q.scalar(
+        "SELECT count(*) FROM advances WHERE batch_id = ? AND status <> 'paid'", batchId,
+      ));
+      if (!unpaid) {
+        q.run("UPDATE payment_batches SET status = 'paid', paid_at = ? WHERE id = ?", paidOn, batchId);
+      }
+      audit(req.user.id, 'advance', adv.id, 'paid', { paidOn, utr, batchId });
+    });
+
+    const row = q.get(`${SELECT} WHERE a.id = ?`, adv.id);
+    res.json({ ...row, actions: actionsFor(req.user, row) });
+  }),
+);
+
 /**
  * Approved requests waiting to be paid, grouped by cut-off window.
  * Everything up to noon forms one run; everything up to 18:30 the next.
@@ -623,7 +665,8 @@ router.post(
     const utrs = req.body.utrs || {}; // { advanceId: utr }
 
     tx(() => {
-      const items = q.all("SELECT id FROM advances WHERE batch_id = ?", batch.id);
+      // Any already marked paid one by one keep their own date and UTR.
+      const items = q.all("SELECT id FROM advances WHERE batch_id = ? AND status <> 'paid'", batch.id);
       items.forEach((i) => {
         q.run(
           "UPDATE advances SET status = 'paid', paid_at = ?, utr = ? WHERE id = ?",

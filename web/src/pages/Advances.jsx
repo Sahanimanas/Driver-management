@@ -45,6 +45,7 @@ function Requests() {
   const [status, setStatus] = useState('pending_approval,approved');
   const [newOpen, setNewOpen] = useState(false);
   const [acting, setActing] = useState(null);
+  const [paying, setPaying] = useState(null);
 
   const { data, loading, error, reload } = useAsync(
     () => api.get(`/advances?status=${status}`), [status],
@@ -113,6 +114,9 @@ function Requests() {
                           <button className="sm danger" onClick={() => setActing({ a, decision: 'reject' })}>Reject</button>
                         </>
                       )}
+                      {a.actions.canPay && (
+                        <button className="sm primary" onClick={() => setPaying(a)}>Mark paid</button>
+                      )}
                       {a.status === 'paid' && <span className="chip green">UTR {a.utr || 'recorded'}</span>}
                       {a.actions.canCancel && !a.actions.canApprove && (
                         <button className="sm" onClick={async () => {
@@ -136,6 +140,8 @@ function Requests() {
         onDone={(msg) => { setNewOpen(false); toast.success(msg); reload(); inbox.reload(); }} />}
       {acting && <DecisionModal {...acting} onClose={() => setActing(null)}
         onDone={() => { setActing(null); reload(); inbox.reload(); }} />}
+      {paying && <MarkPaidModal advance={paying} onClose={() => setPaying(null)}
+        onDone={() => { setPaying(null); reload(); inbox.reload(); }} />}
     </>
   );
 }
@@ -507,6 +513,8 @@ function Payments() {
   const toast = useToast();
   const [selected, setSelected] = useState({});
   const [busy, setBusy] = useState(false);
+  const [paying, setPaying] = useState(null);       // one advance, paid on its own
+  const [runToPay, setRunToPay] = useState(null);   // a run just created, to record at once
   const { data, loading, error, reload } = useAsync(() => api.get('/advances/payable'), []);
 
   const [sheetDate, setSheetDate] = useState(today());
@@ -546,6 +554,8 @@ function Payments() {
       toast.success(res.note);
       setSelected({});
       reload();
+      // Straight on to recording it, rather than leaving it to be found under Past runs.
+      setRunToPay(res.batch);
     } catch (err) {
       toast.error(err);
     } finally {
@@ -610,7 +620,7 @@ function Payments() {
           <table className="tbl">
             <thead>
               <tr><th style={{ width: 34 }} /><th>Driver</th><th>Client ID</th><th className="num">Amount</th>
-                <th>Reason</th><th>Bank</th><th>Approved</th></tr>
+                <th>Reason</th><th>Bank</th><th>Approved</th><th /></tr>
             </thead>
             <tbody>
               {g.items.map((i) => (
@@ -629,6 +639,9 @@ function Payments() {
                       : <span className="chip red">bank details missing</span>}
                   </td>
                   <td className="small muted">{dateTime(i.approved_at)}</td>
+                  <td className="right">
+                    <button className="sm primary" onClick={() => setPaying(i)}>Mark paid</button>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -653,7 +666,67 @@ function Payments() {
           </div>
         </Card>
       )}
+
+      {paying && <MarkPaidModal advance={paying} onClose={() => setPaying(null)}
+        onDone={() => { setPaying(null); reload(); }} />}
+      {runToPay && <PayModal batch={runToPay} onClose={() => setRunToPay(null)}
+        onDone={() => { setRunToPay(null); toast.success('Payment recorded'); reload(); }} />}
     </>
+  );
+}
+
+/**
+ * Mark one approved advance paid: Finance has sent it through internet banking
+ * and records the date and the UTR. No payment run to create first.
+ */
+function MarkPaidModal({ advance, onClose, onDone }) {
+  const toast = useToast();
+  const [paidAt, setPaidAt] = useState(today());
+  const [utr, setUtr] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  async function submit() {
+    setBusy(true);
+    try {
+      await api.post(`/advances/${advance.id}/pay`, { paid_at: paidAt, utr });
+      toast.success(`${inr(advance.amount)} to ${advance.driver_name} marked paid`);
+      onDone();
+    } catch (err) {
+      toast.error(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal title={`Mark paid — ${advance.driver_name}`} onClose={onClose}
+      footer={<>
+        <button onClick={onClose}>Cancel</button>
+        <button className="primary" onClick={submit} disabled={busy}>
+          {busy ? <span className="spinner" /> : `Mark ${inr(advance.amount)} paid`}
+        </button>
+      </>}>
+      <dl className="kv">
+        <dt>Driver</dt><dd><b>{advance.driver_name}</b> · <span className="mono">{advance.client_id}</span></dd>
+        <dt>Amount</dt><dd><b>{inr(advance.amount)}</b></dd>
+        <dt>Pay to</dt>
+        <dd>{advance.bank_account_no
+          ? <span className="mono">{advance.bank_account_name || advance.driver_name} · {advance.bank_ifsc} · {advance.bank_account_no}</span>
+          : <span className="chip red">bank details missing</span>}</dd>
+        <dt>Approved by</dt><dd>{advance.approved_by_name || '—'}</dd>
+      </dl>
+      <div className="grid c2">
+        <Field label="Payment date">
+          <input type="date" value={paidAt} max={today()} onChange={(e) => setPaidAt(e.target.value)} />
+        </Field>
+        <Field label="UTR / reference" hint="from the bank">
+          <input value={utr} onChange={(e) => setUtr(e.target.value.toUpperCase())} placeholder="HDFCR52026100712345" />
+        </Field>
+      </div>
+      <div className="muted small">
+        It is recovered from the driver's next salary, like every paid advance.
+      </div>
+    </Modal>
   );
 }
 
