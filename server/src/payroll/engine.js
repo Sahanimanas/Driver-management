@@ -78,10 +78,26 @@ export function computePay(structure, month) {
   const factor = Math.min(1, payableDays / daysInMonth);
 
   // ---- earnings -----------------------------------------------------------
-  const earnings = components
-    .filter((c) => c.kind === 'earning')
+  // An earning's full-month figure: a fixed amount, a % of the full basic, or a
+  // % of the full gross of the other earnings. Attendance is applied after.
+  const earningComponents = components.filter((c) => c.kind === 'earning');
+  const basicComponent = earningComponents.find(isBasic);
+  const fullBasicValue = basicComponent && basicComponent.calc === 'fixed'
+    ? (basicComponent.per_driver ? num(month.lsaMonthly) : num(basicComponent.value))
+    : 0;
+  const fullOf = (c, otherGross) => {
+    if (c.per_driver) return num(month.lsaMonthly);
+    if (c.calc === 'percent_of_basic') return (fullBasicValue * num(c.value)) / 100;
+    if (c.calc === 'percent_of_gross') return (otherGross * num(c.value)) / 100;
+    return num(c.value);
+  };
+  const fullBeforeGrossPercent = earningComponents
+    .filter((c) => c.calc !== 'percent_of_gross')
+    .reduce((s, c) => s + fullOf(c, 0), 0);
+
+  const earnings = earningComponents
     .map((c) => {
-      const full = c.per_driver ? num(month.lsaMonthly) : num(c.value);
+      const full = fullOf(c, fullBeforeGrossPercent);
       let amount = c.prorated ? full * factor : full;
       if (c.rounding === 'rupee') amount = excelRound(amount);
       // Earnings may only be conditioned on attendance; gross isn't known yet.
