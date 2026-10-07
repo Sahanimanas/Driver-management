@@ -22,8 +22,9 @@ Open http://localhost:5173 and sign in with any demo account
 | Admin / Director | `director@quantum.test` |
 | Finance | `finance@quantum.test` |
 
-There is a second Admin / Director account, `admin@quantum.test`, because
-nobody may approve a request they raised themselves.
+There is a second supervisor, `supervisor2@quantum.test`, with a third of the
+deployed drivers under her — each supervisor sees only their own drivers. A
+second Admin / Director account is `admin@quantum.test`.
 
 ## Checking it
 
@@ -55,7 +56,10 @@ pasted text until you supply credentials.
 `Drivers → Register driver` captures name, photo, phone, Aadhar, address, date
 of birth, driving licence with validity, the Aadhar and licence **front and
 back**, two reference contacts, bank details and UAN. A unique registration ID
-(`QDM/YYYY/00001`) is allotted on save.
+(`QDM/YYYY/00001`) is allotted on save. Admin / Director sets its format in
+**Settings → Registration number format** — prefix, separator, four- or two-digit
+year or none, and the padding of the running number. A change applies to new
+registrations; numbers already given are kept.
 
 The bank section asks only for the **account number, IFSC and account holder's
 name**, with a **cancelled cheque or passbook** page as proof. The bank's name is
@@ -148,7 +152,11 @@ that shows what would change before anything is saved.
 
 ### Advances
 Supervisor raises on the driver's behalf (driver ID, amount, reason, date) →
-Admin / Director approves → Finance pays. Nobody can approve their own request.
+Admin / Director approves → Finance pays. An Admin / Director may approve a
+request they raised themselves.
+
+Finance pays an approved advance either one at a time — **Mark paid** on the
+request, with the payment date and UTR — or in a payment run, below.
 
 While approving, the screen shows **what the driver has already taken this
 month and what they have accrued from the attendance actually on record**,
@@ -220,26 +228,39 @@ flow runs in simulation mode.
 
 ## Roles
 
-Three roles:
+Access is by **permission**, and a role is a named set of permissions
+(`server/src/roles.js`). Three roles are built in and fixed; Admin / Director
+creates more under **Users & roles → Roles** — from scratch, or by duplicating a
+built-in role and adjusting the copy. A role marked **supervises drivers** is a
+field role: drivers are deployed under people in it, and they see only those
+drivers.
 
-| Role | Can do |
+| Built-in role | Can do |
 | --- | --- |
 | **Supervisor** | Register drivers, record screening, deploy, mark attendance, raise advance and expense requests, settle petty cash |
 | **Admin / Director** | Approve every advance and expense, maintain the salary master and branding, manage users — and everything the other two roles can do |
 | **Finance** | Advance payment runs, expense settlement, payroll and the wage register, bank upload sheets, bank reconciliation, Tally linkage, petty cash float |
 
 The approval chain is therefore: supervisor raises → Admin / Director approves →
-Finance pays. **Nobody can approve a request they raised themselves**, so a
-request raised by an Admin / Director must be actioned by a different one.
+Finance pays. Whoever holds an approval permission may approve a request they
+raised themselves.
+
+### Supervisors see their own drivers
+The deployment form asks which **supervisor** the driver is deployed under (a
+supervisor deploying is preselected). From then on only that supervisor sees the
+driver — profile, attendance, advances, challans, expenses, insurance, payroll
+lines, broadcasts and the dashboard counts. Drivers not deployed at all are
+visible to every supervisor, so they can be registered, screened and deployed.
+A deployment can be handed to another supervisor from its Edit screen.
 
 > The scope document describes two approval levels (Senior Manager, then
 > Director). Those collapse into one here because the agreed role list has no
-> Senior Manager. The rule the document was protecting — that a request is never
-> self-approved — is kept. See `Quantum_Scope_Status.xlsx`.
+> Senior Manager. See `Quantum_Scope_Status.xlsx`.
 
 Databases created before this change migrate themselves on first boot: Senior
 Manager and Director both become Admin / Director, Accounts becomes Finance, and
 the two approval stages on existing advances and expenses are merged into one.
+Existing deployments are put under the supervisor who made them.
 
 ## Scope status
 
