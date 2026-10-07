@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { q, audit } from '../db.js';
 import { config } from '../config.js';
 import { authenticate, allow } from '../auth.js';
+import { regNoFormat, validateRegNoFormat, formatRegNo } from '../regno.js';
 import { upload, saveAttachment, removeAttachment } from '../files.js';
 import { h, bad } from '../util.js';
 
@@ -55,6 +56,7 @@ router.get(
     res.json({
       branding: branding(),
       roles: q.all('SELECT key, label, description FROM roles ORDER BY builtin DESC, label'),
+      regNoFormat: regNoFormat(),
       rules: {
         expenseDirectorThreshold: config.rules.expenseDirectorThreshold,
         netbankingMaxRequests: config.rules.netbankingMaxRequests,
@@ -84,6 +86,22 @@ router.put(
     if (!Object.keys(applied).length) throw bad('Nothing to update');
     audit(req.user.id, 'settings', 'branding', 'updated', applied);
     res.json(branding());
+  }),
+);
+
+/**
+ * The registration number format. Applies to drivers registered from now on;
+ * numbers already allotted stay as they are.
+ */
+router.put(
+  '/settings/registration-number',
+  authenticate,
+  allow('settings.manage'),
+  h(async (req, res) => {
+    const fmt = validateRegNoFormat(req.body);
+    set('reg_no_format', JSON.stringify(fmt), req.user.id);
+    audit(req.user.id, 'settings', 'reg_no_format', 'updated', fmt);
+    res.json({ format: fmt, example: formatRegNo(fmt, new Date().getFullYear(), 1) });
   }),
 );
 

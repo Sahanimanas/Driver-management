@@ -1,5 +1,6 @@
 import { Router } from 'express';
-import { q, tx, audit, nextCounter } from '../db.js';
+import { q, tx, audit } from '../db.js';
+import { allocateRegistrationNo } from '../regno.js';
 import { authenticate, allow } from '../auth.js';
 import { driverScope, assertDriver } from '../scope.js';
 import { upload, saveAttachment, removeAttachment } from '../files.js';
@@ -93,12 +94,6 @@ export function completeness(driverId) {
   if (!d.uan_no) deferred.push('UAN number');
 
   return { complete: missing.length === 0, missing, deferred, referenceCount: refs };
-}
-
-function allocateRegistrationNo() {
-  const year = new Date().getFullYear();
-  const n = nextCounter(`registration:${year}`);
-  return `QDM/${year}/${String(n).padStart(5, '0')}`;
 }
 
 /** Total days of service across every stint the person has ever had. */

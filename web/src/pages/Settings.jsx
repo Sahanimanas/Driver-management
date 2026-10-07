@@ -138,6 +138,8 @@ export default function Settings() {
         </div>
       </Card>
 
+      {data?.regNoFormat && <RegistrationNumber saved={data.regNoFormat} onSaved={reload} />}
+
       <Locations />
 
       <Card title="Roles" actions={<Link className="btn sm" to="/users">Manage roles</Link>}>
@@ -205,6 +207,84 @@ export default function Settings() {
         </div>
       </Card>
     </Page>
+  );
+}
+
+/**
+ * The registration number format. The next number is previewed as it is
+ * built; drivers already registered keep the number they were given.
+ */
+const SEPARATORS = [['/', 'Slash  /'], ['-', 'Hyphen  -'], ['', 'None']];
+const YEARS = [['YYYY', 'Four digits (2026)'], ['YY', 'Two digits (26)'], ['none', 'No year']];
+
+function RegistrationNumber({ saved, onSaved }) {
+  const toast = useToast();
+  const [fmt, setFmt] = useState(saved);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => setFmt(saved), [saved]);
+
+  const year = new Date().getFullYear();
+  const example = (n) => [
+    fmt.prefix.trim().toUpperCase(),
+    fmt.year === 'YYYY' ? String(year) : fmt.year === 'YY' ? String(year).slice(-2) : '',
+    String(n).padStart(Number(fmt.digits) || 1, '0'),
+  ].filter(Boolean).join(fmt.separator);
+  const changed = JSON.stringify(fmt) !== JSON.stringify(saved);
+
+  async function save() {
+    setBusy(true);
+    try {
+      const res = await api.put('/settings/registration-number', fmt);
+      toast.success(`New registrations will be numbered like ${res.example}`);
+      onSaved();
+    } catch (err) {
+      toast.error(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card title="Registration number format">
+      <div className="grid c4">
+        <Field label="Prefix" hint="letters / digits">
+          <input value={fmt.prefix} maxLength={10} placeholder="QDM"
+            onChange={(e) => setFmt((f) => ({ ...f, prefix: e.target.value.toUpperCase().replace(/[^A-Z0-9-]/g, '') }))} />
+        </Field>
+        <Field label="Separator">
+          <select value={fmt.separator} onChange={(e) => setFmt((f) => ({ ...f, separator: e.target.value }))}>
+            {SEPARATORS.map(([v, l]) => <option key={l} value={v}>{l}</option>)}
+          </select>
+        </Field>
+        <Field label="Year">
+          <select value={fmt.year} onChange={(e) => setFmt((f) => ({ ...f, year: e.target.value }))}>
+            {YEARS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+          </select>
+        </Field>
+        <Field label="Running number" hint="digits">
+          <select value={fmt.digits} onChange={(e) => setFmt((f) => ({ ...f, digits: Number(e.target.value) }))}>
+            {[3, 4, 5, 6, 7, 8].map((n) => <option key={n} value={n}>{n} digits ({'0'.repeat(n - 1)}1)</option>)}
+          </select>
+        </Field>
+      </div>
+      <div className="row wrap" style={{ alignItems: 'center' }}>
+        <span className="muted small">Looks like</span>
+        <span className="chip blue mono">{example(1)}</span>
+        <span className="chip mono">{example(2)}</span>
+        <span className="chip mono">{example(42)}</span>
+        <div className="spacer" style={{ flex: 1 }} />
+        {changed && <button onClick={() => setFmt(saved)}>Undo</button>}
+        <button className="primary" onClick={save} disabled={busy || !changed}>
+          {busy ? <span className="spinner" /> : 'Save format'}
+        </button>
+      </div>
+      <div className="muted small" style={{ marginTop: 10 }}>
+        Applies to drivers registered from now on — numbers already given are kept, since they are
+        on paper elsewhere. {fmt.year === 'none'
+          ? 'Without a year the running number never restarts.'
+          : 'The running number restarts from 1 each year.'}
+      </div>
+    </Card>
   );
 }
 
