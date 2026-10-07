@@ -27,6 +27,42 @@ const BLANK_COMPONENT = {
   employer: false, per_driver: false, is_basic: false,
 };
 
+/** "Only if", as a choice and a number rather than a code to type. */
+function ConditionInput({ value, kind, onChange }) {
+  const [op, n = ''] = value ? value.split(':') : ['', ''];
+  const options = [
+    ['', 'Always'],
+    ['days_gte', 'If payable days ≥'],
+    // Gross is only known once the earnings are added up, so only a
+    // deduction can depend on it.
+    ...(kind === 'deduction' || op.startsWith('gross') ? [['gross_gt', 'If gross >'], ['gross_lte', 'If gross ≤']] : []),
+  ];
+  return (
+    <>
+      <select value={op} onChange={(e) => onChange(e.target.value ? `${e.target.value}:${n}` : '')}>
+        {options.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+      </select>
+      {op && (
+        <input type="number" min={0} value={n} placeholder={op === 'days_gte' ? '30' : '12000'}
+          style={{ marginTop: 4 }} onChange={(e) => onChange(`${op}:${e.target.value}`)} />
+      )}
+    </>
+  );
+}
+
+/** The basic is the earning whose name starts with "Basic" (Basic, Basic + DA ...). */
+const isBasicName = (name) => /^\s*basic/i.test(String(name || ''));
+
+/** An earning named LSA is paid per driver: the amount is on each driver's deployment. */
+const isLsaName = (name) => /^\s*lsa\b/i.test(String(name || ''));
+
+/** Mark the first earning named Basic as the basic, and only that one. */
+function withBasic(components) {
+  const at = components.findIndex((c) => c.kind === 'earning' && isBasicName(c.name));
+  if (at < 0) return components;
+  return components.map((c, i) => ({ ...c, is_basic: i === at }));
+}
+
 const FORMAT_LABEL = {
   standard: 'Standard',
   hzl: 'HZL register',
@@ -36,16 +72,13 @@ const FORMAT_LABEL = {
 /** The rules on a component, in words, for the structure card. */
 function ruleText(c) {
   const out = [];
-  if (c.is_basic) out.push('basic');
   if (c.rounding === 'rupee') out.push('rounded to ₹');
-  if (c.basis === 'fixed' && c.calc === 'percent_of_basic') out.push('on fixed basic');
   if (Number(c.cap) > 0) out.push(`capped at ${inr(c.cap)}`);
   if (c.condition) {
     const [k, n] = c.condition.split(':');
     out.push({ days_gte: `only at ${n}+ days`, gross_gt: `only if gross > ${n}`, gross_lte: `only if gross ≤ ${n}` }[k]
       || c.condition);
   }
-  if (c.per_driver) out.push('set per driver');
   if (c.employer) out.push('employer cost');
   return out.join(' · ');
 }
@@ -209,7 +242,7 @@ function StructureCard({ row, canEdit, onEdit, onDelete, onToggle }) {
 
       <table className="tbl">
         <thead>
-          <tr><th>Component</th><th>Basis</th><th className="right">Value</th><th>Prorated</th></tr>
+          <tr><th>Component</th><th>Calculated as</th><th className="right">Value</th><th>Prorated</th></tr>
         </thead>
         <tbody>
           {earnings.map(line)}
@@ -280,26 +313,25 @@ function StructureModal({ structure, onClose, onDone }) {
   const [busy, setBusy] = useState(false);
 
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
-  const setC = (i, k, v) => setComponents((cs) => cs.map((c, j) => {
-    if (j === i) return { ...c, [k]: v };
-    // Only one component can be the basic.
-    return k === 'is_basic' && v ? { ...c, is_basic: false } : c;
-  }));
+  const setC = (i, k, v) => setComponents((cs) => cs.map((c, j) => (j === i ? { ...c, [k]: v } : c)));
   const addC = () => setComponents((cs) => [...cs, { ...BLANK_COMPONENT }]);
   const delC = (i) => setComponents((cs) => cs.filter((_, j) => j !== i));
 
   // Roughly the server's arithmetic for a full month, so the total moves as you
-  // type. Amounts set per driver (LSA) are left out; the card preview is exact.
+  // type; the card preview is exact.
   const monthlyGross = useMemo(() => {
-    const basicC = components.find((c) => c.is_basic) || components.find((c) => /^basic/i.test(c.name));
+    const basicC = components.find((c) => c.kind === 'earning' && isBasicName(c.name));
     const basic = Number(basicC?.value || 0);
     let gross = 0;
-    components.filter((c) => c.kind === 'earning' && !c.per_driver).forEach((c) => {
+    // LSA is set per driver, so it is not part of the structure's own gross.
+    components.filter((c) => c.kind === 'earning' && !isLsaName(c.name)).forEach((c) => {
       if (c.calc === 'fixed') gross += Number(c.value || 0);
       else if (c.calc === 'percent_of_basic') gross += (basic * Number(c.value || 0)) / 100;
     });
+    // Each % of gross is taken of the other earnings, as the pay engine does.
+    const base = gross;
     components.filter((c) => c.kind === 'earning' && c.calc === 'percent_of_gross').forEach((c) => {
-      gross += (gross * Number(c.value || 0)) / 100;
+      gross += (base * Number(c.value || 0)) / 100;
     });
     return Math.round(gross * 100) / 100;
   }, [components]);
@@ -313,10 +345,17 @@ function StructureModal({ structure, onClose, onDone }) {
         service_charge: Number(form.service_charge) || 0,
         gst_rate: Number(form.gst_rate) || 0,
         tds_rate: Number(form.tds_rate) || 0,
-        components: components
-          .filter((c) => c.name.trim())
+        components: withBasic(components.filter((c) => c.name.trim()))
           .map((c, i) => ({
-            ...c, seq: i, value: Number(c.value) || 0, cap: Number(c.cap) || 0, condition: c.condition.trim(),
+            ...c,
+            seq: i,
+            value: Number(c.value) || 0,
+            cap: Number(c.cap) || 0,
+            condition: c.condition.trim(),
+            // LSA differs from driver to driver; every other amount is the
+            // structure's own. A % of Basic is always of the basic earned.
+            per_driver: c.kind === 'earning' && isLsaName(c.name),
+            basis: 'earned',
           })),
       };
       if (structure) await api.patch(`/salary-master/${structure.id}`, payload);
@@ -368,7 +407,7 @@ function StructureModal({ structure, onClose, onDone }) {
         <Field label="Effective from">
           <input type="date" value={form.effective_from} onChange={set('effective_from')} />
         </Field>
-        <Field label="Overtime rate / hour">
+        <Field label="Overtime rate / hour" hint="recorded only — overtime hours are not captured yet">
           <input type="number" min={0} value={form.ot_rate_hour} onChange={set('ot_rate_hour')} />
         </Field>
         <Field label="Designation on the register" hint="e.g. LNG Tip Trailer Driver">
@@ -398,15 +437,9 @@ function StructureModal({ structure, onClose, onDone }) {
       <table className="tbl">
         <thead>
           <tr>
-            <th style={{ width: '20%' }}>Name</th>
-            <th>Type</th>
-            <th>Basis</th>
-            <th style={{ width: 100 }}>Value</th>
-            <th>Prorated</th>
-            <th>Round</th>
-            <th style={{ width: 90 }}>Cap</th>
-            <th style={{ width: 120 }}>Only if</th>
-            <th>Flags</th>
+            {['Name', 'Type', 'Calculated as', 'Value', 'Prorated', 'Round', 'Cap', 'Only if', 'Employer'].map((h) => (
+              <th key={h} style={{ width: { Name: '20%', Value: 100, Cap: 90, 'Only if': 140 }[h] }}>{h}</th>
+            ))}
             <th />
           </tr>
         </thead>
@@ -426,14 +459,6 @@ function StructureModal({ structure, onClose, onDone }) {
                   <option value="percent_of_basic">% of Basic</option>
                   <option value="percent_of_gross">% of Gross</option>
                 </select>
-                {c.calc === 'percent_of_basic' && (
-                  <select value={c.basis} onChange={(e) => setC(i, 'basis', e.target.value)}
-                    title="Whether the % is taken of the basic actually earned this month or the full basic"
-                    style={{ marginTop: 4 }}>
-                    <option value="earned">of earned basic</option>
-                    <option value="fixed">of full basic</option>
-                  </select>
-                )}
               </td>
               <td>
                 <input type="number" min={0} step="0.01" value={c.value}
@@ -444,37 +469,23 @@ function StructureModal({ structure, onClose, onDone }) {
                   onChange={(e) => setC(i, 'prorated', e.target.checked)} />
               </td>
               <td>
-                <select value={c.rounding} onChange={(e) => setC(i, 'rounding', e.target.value)}
-                  title="Rupee = Excel ROUND(x,0)">
+                <select value={c.rounding} onChange={(e) => setC(i, 'rounding', e.target.value)}>
                   <option value="none">Paise</option>
                   <option value="rupee">Rupee</option>
                 </select>
               </td>
               <td>
                 <input type="number" min={0} value={c.cap} placeholder="—"
-                  title="Wage ceiling the % is applied to (e.g. PF on 15,000)"
                   onChange={(e) => setC(i, 'cap', e.target.value)} />
               </td>
               <td>
-                <input value={c.condition} placeholder="e.g. days_gte:30"
-                  title="days_gte:N · gross_gt:N · gross_lte:N"
-                  onChange={(e) => setC(i, 'condition', e.target.value)} />
+                <ConditionInput value={c.condition} kind={c.kind}
+                  onChange={(v) => setC(i, 'condition', v)} />
               </td>
-              <td className="small" style={{ whiteSpace: 'nowrap' }}>
-                <label title="The basic that % of Basic lines are taken of">
-                  <input type="checkbox" checked={c.is_basic}
-                    onChange={(e) => setC(i, 'is_basic', e.target.checked)} /> Basic
-                </label><br />
-                {c.kind === 'earning' ? (
-                  <label title="The amount comes from each deployment (LSA), not this structure">
-                    <input type="checkbox" checked={c.per_driver}
-                      onChange={(e) => setC(i, 'per_driver', e.target.checked)} /> Per driver
-                  </label>
-                ) : (
-                  <label title="Paid by the company on top of salary, not deducted from the driver">
-                    <input type="checkbox" checked={c.employer}
-                      onChange={(e) => setC(i, 'employer', e.target.checked)} /> Employer
-                  </label>
+              <td style={{ textAlign: 'center' }}>
+                {c.kind === 'deduction' && (
+                  <input type="checkbox" checked={c.employer}
+                    onChange={(e) => setC(i, 'employer', e.target.checked)} />
                 )}
               </td>
               <td className="right">
@@ -486,14 +497,9 @@ function StructureModal({ structure, onClose, onDone }) {
       </table>
       <button className="sm" style={{ marginTop: 8 }} onClick={addC}>+ Add component</button>
 
-      <div className="banner" style={{ marginTop: 14 }}>
-        <span>ℹ</span>
-        <div>
-          A prorated component is scaled by payable days ÷ days in the month; the rest are paid
-          whole. Payable days are P + T + TA — leave and left days are not paid. <b>Only if</b> takes
-          {' '}<span className="mono">days_gte:30</span> (attendance bonus), <span className="mono">gross_gt:12000</span>
-          {' '}(PT) or <span className="mono">gross_lte:21000</span> (ESIC).
-        </div>
+      <div className="muted small" style={{ marginTop: 10, marginBottom: 12 }}>
+        % of Basic is taken of the earning named Basic. An earning named LSA is paid per
+        driver — its amount is set on each driver's deployment, not here.
       </div>
 
       <Field label="Notes">
