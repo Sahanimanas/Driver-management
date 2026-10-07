@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import { Router } from 'express';
 import { q, tx, audit } from '../db.js';
 import { authenticate, allow } from '../auth.js';
+import { driverScope, assertDriver, canSeeDriver } from '../scope.js';
 import { upload } from '../files.js';
 import { buildWorkbook, readWorkbook, XLSX_MIME } from '../excel.js';
 import { h, bad, notFound, oneOf, bool, isDate, digits } from '../util.js';
@@ -42,6 +43,9 @@ router.get(
       where.push('e.location = ?');
       params.push(location);
     }
+    const scope = driverScope(req.user);
+    where.push(scope.sql);
+    params.push(...scope.params);
 
     const drivers = q.all(
       `SELECT d.id, d.name, d.registration_no, d.phone, d.uan_no,
@@ -91,10 +95,11 @@ router.get(
 /** Update one policy for one driver (the tick-box / dropdown in the UI). */
 router.put(
   '/:driverId/:type',
-  allow('supervisor', 'finance'),
+  allow('insurance.manage'),
   h(async (req, res) => {
     const driverId = Number(req.params.driverId);
     if (!q.get('SELECT id FROM drivers WHERE id = ?', driverId)) throw notFound('Driver not found');
+    assertDriver(req.user, driverId);
     const type = oneOf(String(req.params.type).toUpperCase(), TYPES, 'type');
     const { policy_no, valid_from, valid_to, remarks } = req.body;
     if (valid_from && !isDate(valid_from)) throw bad('valid_from must be YYYY-MM-DD');
@@ -127,12 +132,14 @@ router.get(
     const type = req.query.type ? oneOf(String(req.query.type).toUpperCase(), TYPES, 'type') : null;
     const coveredOnly = req.query.covered === 'true';
 
+    const scope = driverScope(req.user);
     const drivers = q.all(
       `SELECT d.id, d.name, d.registration_no, d.phone, d.uan_no, d.dob_aadhar,
               e.client_id, e.location, e.date_of_joining
        FROM drivers d
        LEFT JOIN employments e ON e.driver_id = d.id AND e.status = 'active'
-       WHERE e.id IS NOT NULL ORDER BY d.name`,
+       WHERE e.id IS NOT NULL AND ${scope.sql} ORDER BY d.name`,
+      ...scope.params,
     );
     const cover = q.all('SELECT * FROM insurance');
     const byDriver = new Map();
@@ -212,7 +219,7 @@ router.get(
 /** Bulk update coverage from an uploaded sheet. */
 router.post(
   '/import',
-  allow('supervisor', 'finance'),
+  allow('insurance.manage'),
   upload.single('file'),
   h(async (req, res) => {
     if (!req.file) throw bad('No file uploaded');
@@ -256,7 +263,7 @@ router.post(
             )
             : null;
 
-        if (!driver) {
+        if (!driver || !canSeeDriver(req.user, driver.id)) {
           results.errors.push({ row: row.__row, error: `Driver not found (${reg || clientId || 'no identifier'})` });
           return;
         }

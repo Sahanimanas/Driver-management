@@ -26,7 +26,7 @@ export default function Insurance() {
     [search, type, covered],
   );
 
-  const editable = can('supervisor', 'finance');
+  const editable = can('insurance.manage');
 
   /**
    * Ticking a box in the grid opens the policy details rather than saving on

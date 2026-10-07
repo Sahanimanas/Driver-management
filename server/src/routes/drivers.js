@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { q, tx, audit, nextCounter } from '../db.js';
 import { authenticate, allow } from '../auth.js';
+import { driverScope, assertDriver } from '../scope.js';
 import { upload, saveAttachment, removeAttachment } from '../files.js';
 import { extractFromFile, extractFromText, mergeExtractions, ocrStatus } from '../scan.js';
 import {
@@ -147,15 +148,19 @@ router.get(
     // still be put forward -- not the blacklisted, not the client-rejected.
     if (deployed === 'false') where.push("e.id IS NULL AND d.blacklisted = 0 AND d.status <> 'rejected'");
     if (blacklisted === 'true') where.push('d.blacklisted = 1');
+    const scope = driverScope(req.user);
+    where.push(scope.sql);
+    params.push(...scope.params);
 
     const sql = `
       SELECT d.id, d.registration_no, d.name, d.phone, d.status, d.photo_id, d.dl_valid_till,
              d.blacklisted, d.blacklisted_on,
              e.id AS employment_id, e.client_id, e.date_of_joining, e.vehicle_number, e.location,
-             s.name AS salary_class
+             e.supervisor_id, s.name AS salary_class, su.name AS supervisor_name
       FROM drivers d
       LEFT JOIN employments e ON e.driver_id = d.id AND e.status = 'active'
       LEFT JOIN salary_structures s ON s.id = e.salary_structure_id
+      LEFT JOIN users su ON su.id = e.supervisor_id
       ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
       ORDER BY d.created_at DESC
       LIMIT ? OFFSET ?`;
@@ -185,10 +190,12 @@ router.get(
     const id = Number(req.params.id);
     const driver = q.get('SELECT * FROM drivers WHERE id = ?', id);
     if (!driver) throw notFound('Driver not found');
+    assertDriver(req.user, id);
 
     const employments = q.all(
-      `SELECT e.*, s.name AS salary_class, s.code AS salary_class_code
+      `SELECT e.*, s.name AS salary_class, s.code AS salary_class_code, su.name AS supervisor_name
          FROM employments e LEFT JOIN salary_structures s ON s.id = e.salary_structure_id
+         LEFT JOIN users su ON su.id = e.supervisor_id
         WHERE e.driver_id = ? ORDER BY e.date_of_joining DESC`,
       id,
     );
@@ -233,7 +240,7 @@ const REG_FILES = upload.fields(Object.keys(DOC_SLOTS).map((name) => ({ name, ma
 
 router.post(
   '/',
-  allow('supervisor'),
+  allow('drivers.register'),
   REG_FILES,
   h(async (req, res) => {
     const p = driverPayload(req.body);
@@ -384,11 +391,12 @@ const EDITABLE = [
 
 router.patch(
   '/:id',
-  allow('supervisor', 'finance'),
+  allow('drivers.edit'),
   h(async (req, res) => {
     const id = Number(req.params.id);
     const driver = q.get('SELECT * FROM drivers WHERE id = ?', id);
     if (!driver) throw notFound('Driver not found');
+    assertDriver(req.user, id);
 
     const patch = {};
     EDITABLE.forEach((k) => {
@@ -425,10 +433,11 @@ router.patch(
 // ------------------------------------------------------------ references
 router.put(
   '/:id/references',
-  allow('supervisor'),
+  allow('drivers.register'),
   h(async (req, res) => {
     const id = Number(req.params.id);
     if (!q.get('SELECT id FROM drivers WHERE id = ?', id)) throw notFound('Driver not found');
+    assertDriver(req.user, id);
     const refs = Array.isArray(req.body.references) ? req.body.references : [];
     if (refs.some((r) => !r.name || !validPhone(r.phone))) {
       throw bad('Each reference needs a name and a valid 10 digit phone number');
@@ -450,12 +459,13 @@ router.put(
 // ------------------------------------------------------------- documents
 router.post(
   '/:id/documents',
-  allow('supervisor', 'finance'),
+  allow('drivers.edit'),
   upload.single('file'),
   h(async (req, res) => {
     const id = Number(req.params.id);
     const driver = q.get('SELECT * FROM drivers WHERE id = ?', id);
     if (!driver) throw notFound('Driver not found');
+    assertDriver(req.user, id);
     if (!req.file) throw bad('No file uploaded');
     const columns = Object.fromEntries(Object.values(DOC_SLOTS));
     const kind = oneOf(req.body.kind || 'other', [...Object.keys(columns), 'other'], 'kind');
@@ -474,16 +484,18 @@ router.post(
 
 // -------------------------------------------------- screening / onboarding
 router.get('/:id/screenings', h(async (req, res) => {
+  assertDriver(req.user, req.params.id);
   res.json(q.all('SELECT * FROM screenings WHERE driver_id = ?', Number(req.params.id)));
 }));
 
 router.post(
   '/:id/screenings',
-  allow('supervisor'),
+  allow('drivers.register'),
   h(async (req, res) => {
     const id = Number(req.params.id);
     const driver = q.get('SELECT * FROM drivers WHERE id = ?', id);
     if (!driver) throw notFound('Driver not found');
+    assertDriver(req.user, id);
 
     const type = oneOf(req.body.type, SCREENING_TYPES, 'type');
     const status = oneOf(req.body.status, ['pending', 'passed', 'failed'], 'status');
@@ -529,11 +541,12 @@ router.post(
  */
 router.post(
   '/:id/blacklist',
-  allow('supervisor'),
+  allow('drivers.blacklist'),
   h(async (req, res) => {
     const id = Number(req.params.id);
     const driver = q.get('SELECT * FROM drivers WHERE id = ?', id);
     if (!driver) throw notFound('Driver not found');
+    assertDriver(req.user, id);
     if (driver.blacklisted) throw bad('This driver is already blacklisted');
     const reason = String(req.body.reason || '').trim();
     if (reason.length < 3) throw bad('Record the reason for blacklisting the driver');
@@ -553,7 +566,7 @@ router.post(
 /** Lifting a blacklist is a management decision. */
 router.post(
   '/:id/blacklist/lift',
-  allow('admin'),
+  allow('drivers.unblacklist'),
   h(async (req, res) => {
     const id = Number(req.params.id);
     const driver = q.get('SELECT * FROM drivers WHERE id = ?', id);
@@ -600,7 +613,7 @@ router.get('/scan/status', (_req, res) => res.json(ocrStatus()));
  */
 router.post(
   '/scan',
-  allow('supervisor'),
+  allow('drivers.register'),
   upload.array('files', 5),
   h(async (req, res) => {
     const files = req.files?.length ? req.files : (req.file ? [req.file] : []);

@@ -73,7 +73,7 @@ function Requests() {
         <button onClick={() => api.download(
           `/expenses/export/register?from=${today().slice(0, 4)}-01-01&to=${today()}`,
           'expense-register.xlsx')}>⭳ Register</button>
-        {can('supervisor') && (
+        {can('expenses.raise') && (
           <button className="primary" onClick={() => setNewOpen(true)}>+ Raise request</button>
         )}
       </div>
@@ -382,7 +382,7 @@ function PettyCash() {
     <>
       <div className="toolbar">
         <div className="spacer" />
-        {can('finance') && <button className="primary" onClick={() => setIssueOpen(true)}>+ Issue petty cash</button>}
+        {can('pettycash.manage') && <button className="primary" onClick={() => setIssueOpen(true)}>+ Issue petty cash</button>}
       </div>
 
       <Card title="Supervisor balances" tight>

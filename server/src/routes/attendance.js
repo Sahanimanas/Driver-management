@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { q, tx, audit } from '../db.js';
 import { authenticate, allow } from '../auth.js';
+import { employmentScope, canSeeEmployment, assertEmployment } from '../scope.js';
 import { buildWorkbook, readWorkbook, XLSX_MIME } from '../excel.js';
 import { upload } from '../files.js';
 import {
@@ -75,6 +76,9 @@ router.get(
       const like = `%${search}%`;
       params.push(like, like, like);
     }
+    const scope = employmentScope(req.user);
+    where.push(scope.sql);
+    params.push(...scope.params);
 
     const emps = q.all(
       `SELECT e.*, d.name, d.registration_no, d.photo_id
@@ -155,7 +159,7 @@ function applyMarks(marks, user) {
       marks.forEach((m, idx) => {
         const empId = Number(m.employment_id);
         const emp = q.get('SELECT * FROM employments WHERE id = ?', empId);
-        if (!emp) {
+        if (!emp || !canSeeEmployment(user, emp)) {
           errors.push({ idx, error: 'Unknown deployment' });
           return;
         }
@@ -220,7 +224,7 @@ function applyMarks(marks, user) {
 /** Mark one or many cells: { marks: [{ employment_id, day, code, remarks }] } */
 router.post(
   '/mark',
-  allow('supervisor'),
+  allow('attendance.mark'),
   h(async (req, res) => {
     const marks = Array.isArray(req.body.marks) ? req.body.marks : [req.body];
     res.json(applyMarks(marks, req.user));
@@ -230,7 +234,7 @@ router.post(
 /** Fill a whole date range for one deployment (bulk leave, training block, ...). */
 router.post(
   '/bulk-range',
-  allow('supervisor'),
+  allow('attendance.mark'),
   h(async (req, res) => {
     const { employment_id, from, to } = req.body;
     const code = oneOf(req.body.code, CODES, 'code');
@@ -238,7 +242,7 @@ router.post(
     if (diffDays(from, to) < 0) throw bad('"to" must not be before "from"');
     if (diffDays(from, to) > 92) throw bad('Range is limited to 92 days');
     const emp = q.get('SELECT * FROM employments WHERE id = ?', Number(employment_id));
-    if (!emp) throw notFound('Deployment not found');
+    assertEmployment(req.user, emp);
 
     const marks = [];
     for (let d = from; diffDays(d, to) >= 0; d = addDays(d, 1)) {
@@ -271,11 +275,13 @@ router.get(
     const first = days[0];
     const last = days[days.length - 1];
 
+    const scope = employmentScope(req.user);
     const emps = q.all(
       `SELECT e.*, d.name, d.registration_no FROM employments e JOIN drivers d ON d.id = e.driver_id
        WHERE e.date_of_joining <= ? AND (e.date_of_leaving IS NULL OR e.date_of_leaving >= ?)
+         AND ${scope.sql}
        ORDER BY e.location, d.name`,
-      last, first,
+      last, first, ...scope.params,
     );
     const marks = q.all('SELECT employment_id, day, code FROM attendance WHERE day BETWEEN ? AND ?', first, last);
     const byEmp = new Map();
@@ -327,7 +333,7 @@ router.get(
 
 router.post(
   '/upload',
-  allow('supervisor'),
+  allow('attendance.mark'),
   upload.single('file'),
   h(async (req, res) => {
     if (!req.file) throw bad('No file uploaded');
@@ -365,7 +371,7 @@ router.post(
         empCache.set(empId, q.get('SELECT * FROM employments WHERE id = ?', empId));
       }
       const emp = empCache.get(empId);
-      if (!emp) {
+      if (!emp || !canSeeEmployment(req.user, emp)) {
         rejected.push({ row: row.__row, driver: label, reason: `Deployment ${empId} does not exist` });
         return;
       }
@@ -452,11 +458,13 @@ router.get(
     const first = days[0];
     const last = days[days.length - 1];
 
+    const scope = employmentScope(req.user);
     const emps = q.all(
       `SELECT e.*, d.name, d.registration_no FROM employments e JOIN drivers d ON d.id = e.driver_id
        WHERE e.date_of_joining <= ? AND (e.date_of_leaving IS NULL OR e.date_of_leaving >= ?)
+         AND ${scope.sql}
        ORDER BY e.location, d.name`,
-      last, first,
+      last, first, ...scope.params,
     );
     const marks = q.all('SELECT employment_id, day, code FROM attendance WHERE day BETWEEN ? AND ?', first, last);
     const byEmp = new Map();

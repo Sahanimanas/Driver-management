@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { api, fileUrl } from '../lib/api.js';
-import { useAsync, useToast, Field, Modal, Loading, ErrorBanner, Avatar } from '../lib/ui.jsx';
+import { useAsync, useAuth, useToast, Field, Modal, Loading, ErrorBanner, Avatar } from '../lib/ui.jsx';
 import { date, today } from '../lib/format.js';
 import StatusChip from './StatusChip.jsx';
 
@@ -13,18 +13,24 @@ const SCREENINGS = [['trial', 'Trial test'], ['safety', 'Safety orientation'], [
  *   Client ID*  ·  Vehicle No  ·  Location (from the list)  ·  Date of joining*
  *   Salary class* -- the structure off the salary master, by name only; the
  *   amounts belong to the salary master, not to this screen.
+ *   Supervisor* -- who the driver is deployed under. Only that supervisor
+ *   sees the driver, their attendance, advances and challans afterwards.
  *
  * The bank account and UAN are asked for here only if registration left them
  * out, since the scope allows them to be completed at this step.
  */
 export default function DeployModal({ driverId, onClose, onDone }) {
   const toast = useToast();
+  const { user } = useAuth();
   const profile = useAsync(() => api.get(`/drivers/${driverId}`), [driverId]);
   const structures = useAsync(() => api.get('/salary-master?active=true'), []);
   const locations = useAsync(() => api.get('/locations'), []);
+  const supervisors = useAsync(() => api.get('/deployments/supervisors'), []);
 
   const [form, setForm] = useState({
     client_id: '', vehicle_number: '', location: '', date_of_joining: today(), salary_structure_id: '',
+    // A supervisor deploying a driver is preselected as the driver's supervisor.
+    supervisor_id: user?.field ? String(user.id) : '',
     bank_account_name: '', bank_account_no: '', bank_ifsc: '', uan_no: '',
   });
   const [allowMissingBank, setAllowMissingBank] = useState(false);
@@ -41,6 +47,7 @@ export default function DeployModal({ driverId, onClose, onDone }) {
   const needsUan = driver && !driver.uan_no;
   const bankEntered = form.bank_account_no.trim() && form.bank_ifsc.trim();
   const locationList = locations.data || [];
+  const supervisorList = supervisors.data || [];
 
   const ready = driver
     && !pending.length
@@ -48,13 +55,14 @@ export default function DeployModal({ driverId, onClose, onDone }) {
     && form.date_of_joining
     && form.salary_structure_id
     && (locationList.length === 0 || form.location)
+    && (supervisorList.length === 0 || form.supervisor_id)
     && (!needsBank || bankEntered || allowMissingBank);
 
   async function submit() {
     setBusy(true);
     try {
       const payload = { driver_id: driverId };
-      ['client_id', 'vehicle_number', 'location', 'date_of_joining', 'salary_structure_id'].forEach((k) => {
+      ['client_id', 'vehicle_number', 'location', 'date_of_joining', 'salary_structure_id', 'supervisor_id'].forEach((k) => {
         if (form[k]) payload[k] = form[k];
       });
       if (needsBank) {
@@ -153,14 +161,28 @@ export default function DeployModal({ driverId, onClose, onDone }) {
               <input type="date" value={form.date_of_joining} onChange={set('date_of_joining')} />
             </Field>
           </div>
-          <Field label="Salary class" required hint="linked to the salary structure in the salary master">
-            <select value={form.salary_structure_id} onChange={set('salary_structure_id')}>
-              <option value="">— choose the salary class —</option>
-              {(structures.data?.rows || []).map((r) => (
-                <option key={r.id} value={r.id}>{r.name}</option>
-              ))}
-            </select>
-          </Field>
+          <div className="grid c2">
+            <Field label="Salary class" required hint="linked to the salary structure in the salary master">
+              <select value={form.salary_structure_id} onChange={set('salary_structure_id')}>
+                <option value="">— choose the salary class —</option>
+                {(structures.data?.rows || []).map((r) => (
+                  <option key={r.id} value={r.id}>{r.name}</option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Supervisor" required={supervisorList.length > 0}
+              hint="only this supervisor will see the driver">
+              <select value={form.supervisor_id} onChange={set('supervisor_id')}
+                disabled={!supervisorList.length}>
+                <option value="">{supervisorList.length ? '— choose the supervisor —' : 'No supervisors set up yet'}</option>
+                {supervisorList.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name}{s.id === user?.id ? ' (you)' : ''} · {s.deployed} deployed
+                  </option>
+                ))}
+              </select>
+            </Field>
+          </div>
 
           {(needsBank || needsUan) && (
             <>

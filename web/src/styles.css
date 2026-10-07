@@ -392,3 +392,10 @@ label.field.invalid > textarea:focus { outline-color: var(--red); }
 .ledger .grp.limit { background: #f5f8fc; }
 .ledger .grp.limit.breach { background: #fdf3f2; }
 .ledger .grp.limit.breach .ln.sub .v { color: var(--red); }
+
+/* ---- role editor: permissions grouped by area ---- */
+.perm-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+.perm-group { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+.perm-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; font-size: 13px; }
+label.check.perm { align-items: flex-start; padding: 4px 0; }
+label.check.perm input { margin-top: 3px; }

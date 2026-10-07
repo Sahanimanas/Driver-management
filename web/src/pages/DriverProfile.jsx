@@ -40,21 +40,21 @@ export default function DriverProfile() {
       title={driver.name}
       subtitle={<span className="mono">{driver.registration_no}</span>}
       actions={<>
-        {can('supervisor') && !activeEmployment && passed && driver.status !== 'rejected' && !driver.blacklisted && (
+        {can('deployments.manage') && !activeEmployment && passed && driver.status !== 'rejected' && !driver.blacklisted && (
           <button className="primary" onClick={() => setDeployOpen(true)}>
             {employments.length ? '+ Rejoin with new ID' : '+ Deploy'}
           </button>
         )}
-        {can('supervisor') && !activeEmployment && driver.status !== 'rejected' && !driver.blacklisted && (
+        {can('drivers.blacklist') && !activeEmployment && driver.status !== 'rejected' && !driver.blacklisted && (
           <button onClick={() => setRejectOpen(true)}>Client rejected</button>
         )}
-        {can('supervisor') && !activeEmployment && !driver.blacklisted && (
+        {can('drivers.blacklist') && !activeEmployment && !driver.blacklisted && (
           <button className="danger" onClick={() => setBlacklistOpen(true)}>Blacklist</button>
         )}
-        {can('admin') && driver.blacklisted ? (
+        {can('drivers.unblacklist') && driver.blacklisted ? (
           <button onClick={() => setLiftOpen(true)}>Lift blacklist</button>
         ) : null}
-        {can('supervisor') && driver.status === 'rejected' && (
+        {can('drivers.blacklist') && driver.status === 'rejected' && (
           <button onClick={async () => {
             try {
               await api.post(`/deployments/reject/${driver.id}/withdraw`, {});
@@ -233,7 +233,7 @@ function Overview({ driver, references, employment, onSaved }) {
     <div className="grid c2">
       <Card
         title="Personal & licence"
-        actions={can('supervisor', 'finance') && (
+        actions={can('drivers.edit') && (
           edit
             ? <><button className="primary sm" onClick={save}>Save</button>
               <button className="sm" onClick={() => { setForm(driver); setEdit(false); }}>Cancel</button></>
@@ -328,6 +328,7 @@ function Overview({ driver, references, employment, onSaved }) {
               <dt>Vehicle</dt><dd className="mono">{employment.vehicle_number || '—'}</dd>
               <dt>Location</dt><dd>{employment.location || '—'}</dd>
               <dt>Salary class</dt><dd>{employment.salary_class || '—'}</dd>
+              <dt>Supervisor</dt><dd>{employment.supervisor_name || '—'}</dd>
             </dl>
           </Card>
         )}
@@ -365,7 +366,7 @@ function Screening({ driverId, screenings, onSaved }) {
       <table className="tbl">
         <thead>
           <tr><th>Stage</th><th>Status</th><th>Conducted on</th><th>Remarks</th>
-            {can('supervisor') && <th className="right">Record</th>}</tr>
+            {can('drivers.register') && <th className="right">Record</th>}</tr>
         </thead>
         <tbody>
           {SCREENINGS.map(([type, label]) => {
@@ -376,7 +377,7 @@ function Screening({ driverId, screenings, onSaved }) {
                 <td><StatusChip value={s.status === 'pending' ? 'pending' : s.status === 'passed' ? 'passed' : 'failed'} /></td>
                 <td>{date(s.conducted_on)}</td>
                 <td className="muted">{s.remarks || '—'}</td>
-                {can('supervisor') && (
+                {can('drivers.register') && (
                   <td className="right nowrap">
                     <button className="sm good" disabled={busy === type} onClick={() => record(type, 'passed')}>Pass</button>{' '}
                     <button className="sm danger" disabled={busy === type} onClick={() => record(type, 'failed')}>Fail</button>
@@ -412,7 +413,7 @@ function IdHistory({ employments, longevity, onChanged }) {
         <table className="tbl">
           <thead>
             <tr><th>Client ID</th><th>Joined</th><th>Left</th><th>Vehicle</th><th>Location</th>
-              <th>Salary class</th><th>Status</th><th>Reason</th><th /></tr>
+              <th>Salary class</th><th>Supervisor</th><th>Status</th><th>Reason</th><th /></tr>
           </thead>
           <tbody>
             {employments.length === 0 && <Empty>This driver has not been deployed yet.</Empty>}
@@ -424,10 +425,11 @@ function IdHistory({ employments, longevity, onChanged }) {
                 <td className="mono">{e.vehicle_number || '—'}</td>
                 <td>{e.location || '—'}</td>
                 <td>{e.salary_class || '—'}</td>
+                <td className="small">{e.supervisor_name || '—'}</td>
                 <td><StatusChip value={e.status} /></td>
                 <td className="muted small">{e.exit_reason || '—'}</td>
                 <td className="right">
-                  {e.status === 'active' && can('supervisor') && (
+                  {e.status === 'active' && can('deployments.manage') && (
                     <button className="sm" onClick={() => setEnding(e)}>End deployment</button>
                   )}
                 </td>
@@ -619,7 +621,7 @@ function Documents({ driver, attachments, onSaved }) {
                 <span>!</span><div>Not uploaded yet.</div>
               </div>
             )}
-            {can('supervisor', 'finance') && (
+            {can('drivers.edit') && (
               <label className="field" style={{ marginTop: 10, marginBottom: 0 }}>
                 <span>{attId ? 'Replace' : 'Upload'} {busy === kind && <span className="spinner" />}</span>
                 <input type="file" accept="image/*,application/pdf"
@@ -684,7 +686,7 @@ function InsuranceTab({ driverId, insurance, onSaved }) {
               <tr key={type}>
                 <td><b>{type}</b> <span className="muted small">{label}</span></td>
                 <td>
-                  {can('supervisor', 'finance') ? (
+                  {can('insurance.manage') ? (
                     <label className="check">
                       <input type="checkbox" checked={!!row.covered} onChange={() => toggle(type, row)} />
                       {row.covered ? 'Covered' : 'Not covered'}
@@ -722,7 +724,7 @@ function Finance({ driver, advances, expenses, debits, onChanged }) {
         {awaiting.length > 0 && (
           <span className="chip grey">{awaiting.length} awaiting approval</span>
         )}
-        {can('supervisor', 'finance') && (
+        {can('debits.raise') && (
           <button className="sm primary" onClick={() => setRaising(true)}>+ Challan / debit</button>
         )}
       </>}

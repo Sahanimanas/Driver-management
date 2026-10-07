@@ -8,9 +8,8 @@ import { today, addDays, periodDays } from './util.js';
 import { CLIENT_STRUCTURES as STRUCTURES } from './payroll/structures.js';
 import { installStructure } from './payroll/install.js';
 
-// Three roles: supervisor, admin (Admin / Director) and finance.
-// Two Admin / Director accounts, so that the rule against approving your own
-// request is demonstrable rather than theoretical.
+// The three built-in roles: supervisor, admin (Admin / Director) and finance.
+// Two supervisors, so that each seeing only their own drivers is demonstrable.
 const USERS = [
   ['Ramesh Yadav', 'supervisor@quantum.test', 'supervisor', 'Quantum@123'],
   ['Sunita Rao', 'supervisor2@quantum.test', 'supervisor', 'Quantum@123'],
@@ -47,6 +46,8 @@ function reset() {
     'audit_log', 'counters', 'users',
   ];
   tables.forEach((t) => q.run(`DELETE FROM ${t}`));
+  // Custom roles go with the users; the built-in ones stay.
+  q.run('DELETE FROM roles WHERE builtin = 0');
 }
 
 function seedUsers() {
@@ -229,6 +230,13 @@ function seedDeployments(drivers, users, structures) {
     q.run("UPDATE drivers SET status = 'deployed' WHERE id = ?", d.id);
     deployed.push({ ...d, empId, doj, wage, location });
   });
+
+  // Every deployment sits under a supervisor; a third of them under the second
+  // one, so signing in as each shows a different set of drivers.
+  q.run(
+    'UPDATE employments SET supervisor_id = CASE WHEN id % 3 = 0 THEN ? ELSE ? END',
+    users.supervisor2, users.supervisor,
+  );
 
   return deployed;
 }

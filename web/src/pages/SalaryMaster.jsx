@@ -51,9 +51,9 @@ function ruleText(c) {
 }
 
 export default function SalaryMaster() {
-  const { user } = useAuth();
+  const { can } = useAuth();
   const toast = useToast();
-  const canEdit = user.role === 'admin';
+  const canEdit = can('salary_master.manage');
   const [editing, setEditing] = useState(null);
   const [creating, setCreating] = useState(false);
 

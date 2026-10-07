@@ -205,7 +205,7 @@ function billingPatch(body) {
 
 router.post(
   '/',
-  allow('admin'),
+  allow('salary_master.manage'),
   h(async (req, res) => {
     need(req.body, ['code', 'name', 'category', 'effective_from']);
     const category = oneOf(req.body.category, CATEGORIES, 'category');
@@ -248,7 +248,7 @@ router.post(
 
 router.patch(
   '/:id',
-  allow('admin'),
+  allow('salary_master.manage'),
   h(async (req, res) => {
     const id = Number(req.params.id);
     const existing = q.get('SELECT * FROM salary_structures WHERE id = ?', id);
@@ -293,7 +293,7 @@ router.patch(
 
 router.delete(
   '/:id',
-  allow('admin'),
+  allow('salary_master.manage'),
   h(async (req, res) => {
     const id = Number(req.params.id);
     const existing = q.get('SELECT * FROM salary_structures WHERE id = ?', id);

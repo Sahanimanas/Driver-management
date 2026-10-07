@@ -29,7 +29,7 @@ export default function Messaging() {
 
   return (
     <Page title="WhatsApp broadcast" subtitle="Mass communication to drivers"
-      actions={can('supervisor') && (
+      actions={can('messaging.send') && (
         <button className="primary" onClick={() => setComposeOpen(true)}>+ New broadcast</button>
       )}>
       {status.data && (

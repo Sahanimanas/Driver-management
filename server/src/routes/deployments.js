@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { q, tx, audit } from '../db.js';
-import { authenticate, allow } from '../auth.js';
+import { authenticate, allow, fieldRoles } from '../auth.js';
+import { employmentScope, assertDriver, assertEmployment } from '../scope.js';
 import { loadStructure } from './salary-master.js';
 import { blacklist } from './drivers.js';
 import { checkLocation } from './settings.js';
@@ -24,6 +25,45 @@ function lsaMonthly(v) {
   }
   return money(n);
 }
+
+/**
+ * The supervisor a driver is deployed under. Must be an active user in a field
+ * role (Supervisor, or a custom role marked as one). Left blank, it is the
+ * person deploying, if they are a supervisor themselves.
+ */
+function checkSupervisor(value, user) {
+  const roles = fieldRoles();
+  if (value === undefined || value === null || value === '') {
+    if (user.field) return user.id;
+    const anyone = roles.length && q.get(
+      `SELECT 1 FROM users WHERE active = 1 AND role IN (${roles.map(() => '?').join(',')})`, ...roles,
+    );
+    if (anyone) throw bad('Choose the supervisor this driver is deployed under.', { code: 'NO_SUPERVISOR' });
+    return null;
+  }
+  const sup = q.get('SELECT id, role, active FROM users WHERE id = ?', Number(value));
+  if (!sup || !sup.active || !roles.includes(sup.role)) {
+    throw bad('The supervisor must be an active user in a supervisor role.');
+  }
+  return sup.id;
+}
+
+/** Everyone a driver can be deployed under, for the deployment screen. */
+router.get(
+  '/supervisors',
+  h(async (_req, res) => {
+    const roles = fieldRoles();
+    if (!roles.length) return res.json([]);
+    res.json(q.all(
+      `SELECT u.id, u.name, u.role, r.label AS role_label,
+              (SELECT count(*) FROM employments e WHERE e.supervisor_id = u.id AND e.status = 'active') AS deployed
+         FROM users u LEFT JOIN roles r ON r.key = u.role
+        WHERE u.active = 1 AND u.role IN (${roles.map(() => '?').join(',')})
+        ORDER BY u.name`,
+      ...roles,
+    ));
+  }),
+);
 
 /**
  * Registered but not deployed: the drivers a supervisor can put forward.
@@ -107,12 +147,21 @@ router.get(
       const like = `%${search}%`;
       params.push(like, like, like, like);
     }
+    if (req.query.supervisor_id) {
+      where.push('e.supervisor_id = ?');
+      params.push(Number(req.query.supervisor_id));
+    }
+    const scope = employmentScope(req.user);
+    where.push(scope.sql);
+    params.push(...scope.params);
     res.json(
       q.all(
         `SELECT e.*, d.name, d.registration_no, d.phone, d.photo_id, d.status AS driver_status,
-                d.blacklisted, s.name AS salary_class, s.code AS salary_class_code
+                d.blacklisted, s.name AS salary_class, s.code AS salary_class_code,
+                su.name AS supervisor_name
          FROM employments e JOIN drivers d ON d.id = e.driver_id
          LEFT JOIN salary_structures s ON s.id = e.salary_structure_id
+         LEFT JOIN users su ON su.id = e.supervisor_id
          ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
          ORDER BY e.date_of_joining DESC`,
         ...params,
@@ -128,12 +177,13 @@ router.get(
  */
 router.post(
   '/',
-  allow('supervisor'),
+  allow('deployments.manage'),
   h(async (req, res) => {
     need(req.body, ['driver_id', 'client_id', 'date_of_joining']);
     const driverId = Number(req.body.driver_id);
     const driver = q.get('SELECT * FROM drivers WHERE id = ?', driverId);
     if (!driver) throw notFound('Driver not found');
+    assertDriver(req.user, driverId);
     if (driver.blacklisted) {
       throw bad(
         `${driver.name} is blacklisted (${driver.blacklist_reason || 'no reason recorded'}). `
@@ -183,6 +233,7 @@ router.post(
       throw bad('Pick the salary class for this deployment.', { code: 'NO_SALARY_STRUCTURE' });
     }
     const location = checkLocation(req.body.location);
+    const supervisorId = checkSupervisor(req.body.supervisor_id, req.user);
     if (structure && !structure.active) {
       throw bad(`Salary structure ${structure.code} is no longer active — pick a current one.`);
     }
@@ -215,8 +266,8 @@ router.post(
       const empId = q.insert(
         `INSERT INTO employments
            (driver_id, client_id, date_of_joining, vehicle_number, location, monthly_wage,
-            salary_structure_id, lsa_monthly, created_by)
-         VALUES (?,?,?,?,?,?,?,?,?)`,
+            salary_structure_id, lsa_monthly, supervisor_id, created_by)
+         VALUES (?,?,?,?,?,?,?,?,?,?)`,
         driverId,
         clientId,
         doj,
@@ -226,6 +277,7 @@ router.post(
         money(req.body.monthly_wage || structure?.monthly_gross || 0),
         structure?.id || null,
         lsaMonthly(req.body.lsa_monthly),
+        supervisorId,
         req.user.id,
       );
       if (Object.keys(bankPatch).length) {
@@ -241,7 +293,7 @@ router.post(
         driverId,
       );
       audit(req.user.id, 'employment', empId, 'deployed', {
-        clientId, doj, driverId, salaryStructure: structure?.code || null,
+        clientId, doj, driverId, salaryStructure: structure?.code || null, supervisorId,
       });
       return empId;
     });
@@ -261,14 +313,14 @@ router.post(
 
 router.patch(
   '/:id',
-  allow('supervisor', 'finance'),
+  allow('deployments.edit'),
   h(async (req, res) => {
     const emp = q.get('SELECT * FROM employments WHERE id = ?', Number(req.params.id));
-    if (!emp) throw notFound('Deployment not found');
+    assertEmployment(req.user, emp);
 
     const patch = {};
     ['vehicle_number', 'location', 'monthly_wage', 'date_of_joining', 'salary_structure_id',
-      'lsa_monthly'].forEach((k) => {
+      'lsa_monthly', 'supervisor_id'].forEach((k) => {
       if (req.body[k] !== undefined) patch[k] = req.body[k];
     });
     if (patch.salary_structure_id) {
@@ -284,6 +336,7 @@ router.patch(
     if (patch.vehicle_number) patch.vehicle_number = String(patch.vehicle_number).toUpperCase().replace(/\s/g, '');
     if (patch.monthly_wage !== undefined) patch.monthly_wage = Number(patch.monthly_wage) || 0;
     if (patch.lsa_monthly !== undefined) patch.lsa_monthly = lsaMonthly(patch.lsa_monthly);
+    if (patch.supervisor_id !== undefined) patch.supervisor_id = checkSupervisor(patch.supervisor_id, req.user);
     if (!Object.keys(patch).length) throw bad('Nothing to update');
 
     q.run(
@@ -298,10 +351,10 @@ router.patch(
 /** End a stint — resignation or removal. Attendance is closed off with LE. */
 router.post(
   '/:id/end',
-  allow('supervisor'),
+  allow('deployments.manage'),
   h(async (req, res) => {
     const emp = q.get('SELECT * FROM employments WHERE id = ?', Number(req.params.id));
-    if (!emp) throw notFound('Deployment not found');
+    assertEmployment(req.user, emp);
     if (emp.status === 'ended') throw bad('This deployment has already been closed');
 
     const lastDay = req.body.date_of_leaving || today();
@@ -358,12 +411,13 @@ router.post(
  */
 router.post(
   '/reject',
-  allow('supervisor'),
+  allow('drivers.blacklist'),
   h(async (req, res) => {
     need(req.body, ['driver_id', 'reason']);
     const driverId = Number(req.body.driver_id);
     const driver = q.get('SELECT * FROM drivers WHERE id = ?', driverId);
     if (!driver) throw notFound('Driver not found');
+    assertDriver(req.user, driverId);
     if (driver.status === 'deployed') {
       throw bad('This driver is currently deployed — end the deployment instead of rejecting them.');
     }
@@ -386,7 +440,7 @@ router.post(
 /** Put a rejected driver back in the pipeline. */
 router.post(
   '/reject/:driverId/withdraw',
-  allow('supervisor'),
+  allow('drivers.blacklist'),
   h(async (req, res) => {
     const driverId = Number(req.params.driverId);
     const driver = q.get('SELECT * FROM drivers WHERE id = ?', driverId);
@@ -413,6 +467,7 @@ router.get(
     const driverId = Number(req.params.driverId);
     const driver = q.get('SELECT * FROM drivers WHERE id = ?', driverId);
     if (!driver) throw notFound('Driver not found');
+    assertDriver(req.user, driverId);
     const stints = q.all(
       'SELECT * FROM employments WHERE driver_id = ? ORDER BY date_of_joining',
       driverId,

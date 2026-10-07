@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { q, tx, audit } from '../db.js';
 import { authenticate, allow } from '../auth.js';
+import { driverScope } from '../scope.js';
 import { config } from '../config.js';
 import { sendWhatsApp, renderTemplate } from '../whatsapp.js';
 import { h, need, bad, notFound, e164, validPhone } from '../util.js';
@@ -12,9 +13,11 @@ router.use(authenticate);
  * Resolve an audience filter to a recipient list.
  * { status, location, insuranceMissing, deployedOnly, driverIds }
  */
-function resolveAudience(filter = {}) {
-  const where = [];
-  const params = [];
+function resolveAudience(filter = {}, user = null) {
+  // A supervisor broadcasts only to the drivers they can see.
+  const scope = driverScope(user);
+  const where = [scope.sql];
+  const params = [...scope.params];
 
   if (Array.isArray(filter.driverIds) && filter.driverIds.length) {
     where.push(`d.id IN (${filter.driverIds.map(() => '?').join(',')})`);
@@ -59,7 +62,7 @@ router.get('/status', (_req, res) => {
 router.post(
   '/audience/preview',
   h(async (req, res) => {
-    const recipients = resolveAudience(req.body.audience || {});
+    const recipients = resolveAudience(req.body.audience || {}, req.user);
     const reachable = recipients.filter((r) => validPhone(r.phone));
     res.json({
       total: recipients.length,
@@ -106,11 +109,11 @@ router.get(
  */
 router.post(
   '/campaigns',
-  allow('supervisor'),
+  allow('messaging.send'),
   h(async (req, res) => {
     need(req.body, ['title', 'body']);
     const audience = req.body.audience || {};
-    const recipients = resolveAudience(audience).filter((r) => validPhone(r.phone));
+    const recipients = resolveAudience(audience, req.user).filter((r) => validPhone(r.phone));
     if (!recipients.length) throw bad('That audience has no drivers with a valid mobile number');
     if (recipients.length > 5000) throw bad('Audience is too large for a single campaign (max 5000)');
 
@@ -141,7 +144,7 @@ router.post(
 
 router.post(
   '/campaigns/:id/send',
-  allow('supervisor'),
+  allow('messaging.send'),
   h(async (req, res) => {
     const c = q.get('SELECT * FROM campaigns WHERE id = ?', Number(req.params.id));
     if (!c) throw notFound('Campaign not found');

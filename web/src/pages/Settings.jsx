@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { Page } from '../App.jsx';
 import { api } from '../lib/api.js';
 import {
@@ -15,7 +16,7 @@ import { inr } from '../lib/format.js';
  * rules the server is enforcing, so they can be checked against the document.
  */
 export default function Settings() {
-  const { user } = useAuth();
+  const { can } = useAuth();
   const toast = useToast();
   const fileRef = useRef(null);
   const { data, loading, error, reload } = useAsync(() => api.get('/settings'), []);
@@ -32,12 +33,12 @@ export default function Settings() {
     });
   }, [data]);
 
-  if (user.role !== 'admin') {
+  if (!can('settings.manage')) {
     return (
       <Page title="Settings">
         <div className="banner error">
           <span>⚠</span>
-          <div>Settings are limited to Admin / Director.</div>
+          <div>Your role does not include changing settings.</div>
         </div>
       </Page>
     );
@@ -139,7 +140,7 @@ export default function Settings() {
 
       <Locations />
 
-      <Card title="Roles">
+      <Card title="Roles" actions={<Link className="btn sm" to="/users">Manage roles</Link>}>
         <table className="tbl">
           <tbody>
             {(data?.roles || []).map((r) => (

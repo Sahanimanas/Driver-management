@@ -2,7 +2,6 @@ import React, { useEffect, useState } from 'react';
 import { NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { api } from './lib/api.js';
 import { useAuth, useBranding, Loading } from './lib/ui.jsx';
-import { ROLE_LABEL } from './lib/roles.js';
 
 import Login from './pages/Login.jsx';
 import Dashboard from './pages/Dashboard.jsx';
@@ -33,16 +32,16 @@ const NAV = [
   { to: '/expenses', label: 'Expenses', icon: '🧾', badge: 'expenses' },
   { to: '/salary', label: 'Salary', icon: '📄' },
   { to: '/salary-master', label: 'Salary Master', icon: '📐' },
-  { to: '/tally', label: 'Tally Linkage', icon: '⇄', roles: ['finance'] },
+  { to: '/tally', label: 'Tally Linkage', icon: '⇄', perm: 'tally.post' },
   { group: 'Communication' },
   { to: '/messaging', label: 'WhatsApp', icon: '💬' },
   { group: 'Administration' },
-  { to: '/users', label: 'Users & roles', icon: '👥', roles: [] },
-  { to: '/settings', label: 'Settings', icon: '⚙', roles: [] },
+  { to: '/users', label: 'Users & roles', icon: '👥', perm: 'users.manage' },
+  { to: '/settings', label: 'Settings', icon: '⚙', perm: 'settings.manage' },
 ];
 
 export default function App() {
-  const { user, ready } = useAuth();
+  const { user, ready, can } = useAuth();
   const location = useLocation();
   const [badges, setBadges] = useState({ advances: 0, expenses: 0 });
 
@@ -52,15 +51,19 @@ export default function App() {
       api.get('/advances/inbox').catch(() => null),
       api.get('/expenses/inbox').catch(() => null),
     ]).then(([adv, exp]) => {
-      const forMe = (inbox) => {
+      const forMe = (inbox, kind) => {
         if (!inbox) return 0;
-        // Admin / Director sees what is waiting on them to approve; Finance
-        // sees what is waiting to be paid; a supervisor sees their own.
-        if (user.role === 'admin') return (inbox.pending_approval ?? 0) + (inbox.debits_pending_approval ?? 0);
-        if (user.role === 'finance') return inbox.approved_unpaid ?? inbox.open_settlements ?? 0;
+        // An approver sees what is waiting on them to approve; whoever pays
+        // sees what is waiting to be paid; anyone else sees their own.
+        if (can(`${kind}.approve`)) {
+          return (inbox.pending_approval ?? 0) + (inbox.debits_pending_approval ?? 0);
+        }
+        if (can(kind === 'advances' ? 'advances.pay' : 'expenses.settle')) {
+          return inbox.approved_unpaid ?? inbox.open_settlements ?? 0;
+        }
         return inbox.my_requests ?? 0;
       };
-      setBadges({ advances: forMe(adv), expenses: forMe(exp) });
+      setBadges({ advances: forMe(adv, 'advances'), expenses: forMe(exp, 'expenses') });
     });
   }, [user, location.pathname]);
 
@@ -74,8 +77,7 @@ export default function App() {
         <nav>
           {NAV.map((item, i) => {
             if (item.group) return <div className="group" key={`g${i}`}>{item.group}</div>;
-            // roles: [] means admin only (admin passes every check).
-            if (item.roles && !(user.role === 'admin' || item.roles.includes(user.role))) return null;
+            if (item.perm && !can(item.perm)) return null;
             const count = item.badge ? badges[item.badge] : 0;
             return (
               <NavLink
@@ -132,7 +134,7 @@ function Brand() {
 
 function UserBox() {
   const { user, signOut } = useAuth();
-  const label = ROLE_LABEL[user.role] || user.role;
+  const label = user.roleLabel || user.role;
   return (
     <div className="who">
       <b>{user.name}</b>

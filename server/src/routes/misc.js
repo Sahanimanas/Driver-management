@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import { Router } from 'express';
 import { q } from '../db.js';
 import { authenticate } from '../auth.js';
+import { driverScope, employmentScope } from '../scope.js';
 import { attachmentPath } from '../files.js';
 import { config } from '../config.js';
 import { h, notFound, today, money, addDays } from '../util.js';
@@ -40,26 +41,35 @@ router.get(
     const monthStart = `${now.slice(0, 7)}-01`;
     const in60 = addDays(now, 60);
 
+    // A supervisor's dashboard counts only the drivers they can see.
+    const ds = driverScope(req.user, 'd');
+    const es = employmentScope(req.user, 'e');
+    const countDrivers = (cond) => Number(q.scalar(
+      `SELECT count(*) FROM drivers d WHERE ${cond} AND ${ds.sql}`, ...ds.params,
+    ));
+
     const drivers = {
-      total: Number(q.scalar('SELECT count(*) FROM drivers')),
-      deployed: Number(q.scalar("SELECT count(*) FROM employments WHERE status = 'active'")),
-      inScreening: Number(q.scalar("SELECT count(*) FROM drivers WHERE status IN ('registered','in_screening')")),
-      cleared: Number(q.scalar("SELECT count(*) FROM drivers WHERE status = 'cleared'")),
-      left: Number(q.scalar("SELECT count(*) FROM drivers WHERE status = 'left'")),
-      // Registered but not deployed -- the pool a supervisor can put forward.
-      notDeployed: Number(q.scalar(
-        `SELECT count(*) FROM drivers d WHERE d.blacklisted = 0 AND d.status <> 'rejected'
-           AND NOT EXISTS (SELECT 1 FROM employments e WHERE e.driver_id = d.id AND e.status = 'active')`,
+      total: countDrivers('1 = 1'),
+      deployed: Number(q.scalar(
+        `SELECT count(*) FROM employments e WHERE e.status = 'active' AND ${es.sql}`, ...es.params,
       )),
-      blacklisted: Number(q.scalar('SELECT count(*) FROM drivers WHERE blacklisted = 1')),
+      inScreening: countDrivers("d.status IN ('registered','in_screening')"),
+      cleared: countDrivers("d.status = 'cleared'"),
+      left: countDrivers("d.status = 'left'"),
+      // Registered but not deployed -- the pool a supervisor can put forward.
+      notDeployed: countDrivers(
+        `d.blacklisted = 0 AND d.status <> 'rejected'
+           AND NOT EXISTS (SELECT 1 FROM employments e WHERE e.driver_id = d.id AND e.status = 'active')`,
+      ),
+      blacklisted: countDrivers('d.blacklisted = 1'),
     };
 
     const attendanceToday = q.all(
       `SELECT COALESCE(a.code, 'P') AS code, count(*) AS n
        FROM employments e LEFT JOIN attendance a ON a.employment_id = e.id AND a.day = ?
-       WHERE e.status = 'active' AND e.date_of_joining <= ?
+       WHERE e.status = 'active' AND e.date_of_joining <= ? AND ${es.sql}
        GROUP BY COALESCE(a.code, 'P')`,
-      now, now,
+      now, now, ...es.params,
     );
 
     const approvals = {
@@ -100,25 +110,27 @@ router.get(
        JOIN drivers d ON d.id = e.driver_id
        WHERE NOT EXISTS (
          SELECT 1 FROM insurance i WHERE i.driver_id = d.id AND i.type = t.type AND i.covered = 1)
+         AND ${es.sql}
        GROUP BY t.type`,
+      ...es.params,
     );
 
     const alerts = {
       dlExpiring: q.all(
         `SELECT d.id, d.name, d.registration_no, d.dl_valid_till FROM drivers d
          JOIN employments e ON e.driver_id = d.id AND e.status = 'active'
-         WHERE d.dl_valid_till IS NOT NULL AND d.dl_valid_till <= ?
+         WHERE d.dl_valid_till IS NOT NULL AND d.dl_valid_till <= ? AND ${es.sql}
          ORDER BY d.dl_valid_till LIMIT 25`,
-        in60,
+        in60, ...es.params,
       ),
       missingBank: Number(q.scalar(
         `SELECT count(*) FROM drivers d JOIN employments e ON e.driver_id = d.id AND e.status = 'active'
-         WHERE d.bank_account_no IS NULL OR d.bank_ifsc IS NULL`,
+         WHERE (d.bank_account_no IS NULL OR d.bank_ifsc IS NULL) AND ${es.sql}`,
+        ...es.params,
       )),
-      screeningStuck: Number(q.scalar(
-        `SELECT count(*) FROM drivers WHERE status IN ('registered','in_screening')
-         AND created_at <= datetime('now', '-14 day')`,
-      )),
+      screeningStuck: countDrivers(
+        `d.status IN ('registered','in_screening') AND d.created_at <= datetime('now', '-14 day')`,
+      ),
     };
 
     const payroll = q.all(

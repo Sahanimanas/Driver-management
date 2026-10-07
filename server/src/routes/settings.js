@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { q, audit } from '../db.js';
 import { config } from '../config.js';
-import { authenticate, allow, ROLES, ROLE_LABEL, ROLE_DESCRIPTION } from '../auth.js';
+import { authenticate, allow } from '../auth.js';
 import { upload, saveAttachment, removeAttachment } from '../files.js';
 import { h, bad } from '../util.js';
 
@@ -54,7 +54,7 @@ router.get(
   h(async (_req, res) => {
     res.json({
       branding: branding(),
-      roles: ROLES.map((r) => ({ key: r, label: ROLE_LABEL[r], description: ROLE_DESCRIPTION[r] })),
+      roles: q.all('SELECT key, label, description FROM roles ORDER BY builtin DESC, label'),
       rules: {
         expenseDirectorThreshold: config.rules.expenseDirectorThreshold,
         netbankingMaxRequests: config.rules.netbankingMaxRequests,
@@ -70,7 +70,7 @@ router.get(
 router.put(
   '/settings/branding',
   authenticate,
-  allow('admin'),
+  allow('settings.manage'),
   h(async (req, res) => {
     const applied = {};
     for (const [key, meta] of Object.entries(KEYS)) {
@@ -90,7 +90,7 @@ router.put(
 router.post(
   '/settings/logo',
   authenticate,
-  allow('admin'),
+  allow('settings.manage'),
   upload.single('file'),
   h(async (req, res) => {
     if (!req.file) throw bad('No logo uploaded');
@@ -111,7 +111,7 @@ router.post(
 router.delete(
   '/settings/logo',
   authenticate,
-  allow('admin'),
+  allow('settings.manage'),
   h(async (req, res) => {
     const previous = get('logo_attachment_id');
     if (previous) removeAttachment(previous);
@@ -157,7 +157,7 @@ router.get(
 router.post(
   '/locations',
   authenticate,
-  allow('admin'),
+  allow('settings.manage'),
   h(async (req, res) => {
     const name = String(req.body.name || '').trim().replace(/\s+/g, ' ');
     if (name.length < 2 || name.length > 60) throw bad('A location name is 2 to 60 characters');
@@ -177,7 +177,7 @@ router.post(
 router.patch(
   '/locations/:id',
   authenticate,
-  allow('admin'),
+  allow('settings.manage'),
   h(async (req, res) => {
     const loc = q.get('SELECT * FROM locations WHERE id = ?', Number(req.params.id));
     if (!loc) throw bad('Location not found');

@@ -10,9 +10,21 @@ CREATE TABLE IF NOT EXISTS users (
   email         TEXT    NOT NULL UNIQUE,
   phone         TEXT,
   password_hash TEXT    NOT NULL,
-  role          TEXT    NOT NULL CHECK (role IN ('supervisor','admin','finance')),
+  role          TEXT    NOT NULL,             -- roles.key: a built-in role or one Admin created
   active        INTEGER NOT NULL DEFAULT 1,
   created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+-- A role is a named set of permissions (see roles.js). The three built-in
+-- roles are rewritten from code on every boot; the rest are created by Admin.
+CREATE TABLE IF NOT EXISTS roles (
+  key         TEXT    PRIMARY KEY,
+  label       TEXT    NOT NULL UNIQUE COLLATE NOCASE,
+  description TEXT,
+  permissions TEXT    NOT NULL DEFAULT '[]',   -- JSON array of permission keys
+  field       INTEGER NOT NULL DEFAULT 0,      -- drivers are deployed under this role, and it sees only its own
+  builtin     INTEGER NOT NULL DEFAULT 0,
+  created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
 -- --------------------------------------------------------------- attachments
@@ -121,6 +133,7 @@ CREATE TABLE IF NOT EXISTS employments (
   location         TEXT,
   monthly_wage     REAL    NOT NULL DEFAULT 0,
   salary_structure_id INTEGER REFERENCES salary_structures(id),
+  supervisor_id    INTEGER REFERENCES users(id),  -- the field supervisor the driver is deployed under
   lsa_monthly      REAL    NOT NULL DEFAULT 0,  -- loyalty service allowance, set per driver
   status           TEXT    NOT NULL DEFAULT 'active' CHECK (status IN ('active','ended')),
   exit_reason      TEXT,

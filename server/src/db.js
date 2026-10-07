@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { db_file } from './config.js';
+import { BUILTIN_ROLES } from './roles.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -122,7 +123,7 @@ function migrateLegacy() {
         email         TEXT    NOT NULL UNIQUE,
         phone         TEXT,
         password_hash TEXT    NOT NULL,
-        role          TEXT    NOT NULL CHECK (role IN ('supervisor','admin','finance')),
+        role          TEXT    NOT NULL,
         active        INTEGER NOT NULL DEFAULT 1,
         created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
       );
@@ -138,6 +139,33 @@ function migrateLegacy() {
         FROM users_legacy;
       DROP TABLE users_legacy;
     `);
+  }
+
+  // --- users: the role is any roles.key, not one of three fixed values ------
+  if (columns('users').length && /CHECK\s*\(\s*role\s+IN/i.test(tableSql('users'))) {
+    db.exec(`
+      ALTER TABLE users RENAME TO users_legacy;
+      CREATE TABLE users (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        name          TEXT    NOT NULL,
+        email         TEXT    NOT NULL UNIQUE,
+        phone         TEXT,
+        password_hash TEXT    NOT NULL,
+        role          TEXT    NOT NULL,
+        active        INTEGER NOT NULL DEFAULT 1,
+        created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
+      );
+      INSERT INTO users (id, name, email, phone, password_hash, role, active, created_at)
+        SELECT id, name, email, phone, password_hash, role, active, created_at FROM users_legacy;
+      DROP TABLE users_legacy;
+    `);
+  }
+
+  // --- deployments gain a supervisor ----------------------------------------
+  // Existing deployments go to the supervisor who made them, where that was one.
+  if (addColumn('employments', 'supervisor_id INTEGER', 'supervisor_id')) {
+    db.exec(`UPDATE employments SET supervisor_id = created_by
+              WHERE created_by IN (SELECT id FROM users WHERE role = 'supervisor')`);
   }
 
   // --- advances / expenses: two approval steps collapse to one -------------
@@ -164,17 +192,59 @@ function migrateLegacy() {
   }
 }
 
+/**
+ * A table rebuild renames the old table aside, and SQLite (3.26+) follows a
+ * rename by re-pointing every foreign key in *other* tables at the new name --
+ * so renaming users to users_legacy left the whole schema referencing a table
+ * that was then dropped. legacy_alter_table stops that during the migration;
+ * this repairs a database a rebuild already broke.
+ */
+function repairLegacyReferences() {
+  const exists = (name) => db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
+  for (const table of ['users', 'driver_debits']) {
+    const legacy = `${table}_legacy`;
+    const broken = db.prepare('SELECT count(*) AS n FROM sqlite_master WHERE sql LIKE ?').get(`%"${legacy}"%`).n;
+    if (!Number(broken) || exists(legacy) || !exists(table)) continue;
+    const version = Number(db.prepare('PRAGMA schema_version').get().schema_version);
+    db.exec('PRAGMA writable_schema = ON');
+    db.prepare('UPDATE sqlite_master SET sql = replace(sql, ?, ?) WHERE sql LIKE ?')
+      .run(`"${legacy}"`, `"${table}"`, `%"${legacy}"%`);
+    db.exec(`PRAGMA schema_version = ${version + 1}`);
+    db.exec('PRAGMA writable_schema = OFF');
+    console.log(`[db] repaired ${broken} table(s) whose foreign keys pointed at ${legacy}`);
+  }
+}
+
 // Rebuilding a table with foreign keys pointing at it needs the constraint
 // enforcement suspended; schema.sql turns it straight back on.
 db.exec('PRAGMA foreign_keys = OFF');
+db.exec('PRAGMA legacy_alter_table = ON');
 try {
   migrateLegacy();
 } catch (err) {
   console.error('[db] legacy migration failed:', err.message);
 }
+db.exec('PRAGMA legacy_alter_table = OFF');
+try {
+  repairLegacyReferences();
+} catch (err) {
+  console.error('[db] reference repair failed:', err.message);
+}
 db.exec('PRAGMA foreign_keys = ON');
 
 db.exec(SCHEMA);
+db.exec('CREATE INDEX IF NOT EXISTS idx_emp_supervisor ON employments(supervisor_id)');
+
+// The built-in roles are defined in code; keep the table in step with it.
+{
+  const upsert = db.prepare(
+    `INSERT INTO roles(key, label, description, permissions, field, builtin)
+     VALUES (?, ?, ?, ?, ?, 1)
+     ON CONFLICT(key) DO UPDATE SET label = excluded.label, description = excluded.description,
+       permissions = excluded.permissions, field = excluded.field, builtin = 1`,
+  );
+  BUILTIN_ROLES.forEach((r) => upsert.run(r.key, r.label, r.description, JSON.stringify(r.permissions), r.field));
+}
 
 // The first time the locations list exists, start it from the sites already
 // in use, so live deployments are on the list the day it is switched on.

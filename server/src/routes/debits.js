@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { q, audit } from '../db.js';
-import { authenticate, allow, is } from '../auth.js';
+import { authenticate, allow, can } from '../auth.js';
+import { assertDriver } from '../scope.js';
 import { buildWorkbook, XLSX_MIME } from '../excel.js';
 import { h, need, bad, notFound, forbidden, isDate, today, money, num, oneOf } from '../util.js';
 
@@ -27,10 +28,18 @@ const SELECT = `
     LEFT JOIN users u ON u.id = x.created_by
     LEFT JOIN users au ON au.id = x.approved_by`;
 
-function filtered(query) {
+/**
+ * A supervisor sees the challans of the drivers deployed under them, and any
+ * they raised themselves.
+ */
+function filtered(query, user) {
   const { driver_id = '', status = '', from = '', to = '', kind = '' } = query;
   const where = [];
   const params = [];
+  if (user.field) {
+    where.push('(x.created_by = ? OR e.supervisor_id IS NULL OR e.supervisor_id = ?)');
+    params.push(user.id, user.id);
+  }
   if (driver_id) {
     where.push('x.driver_id = ?');
     params.push(Number(driver_id));
@@ -62,11 +71,12 @@ function filtered(query) {
 router.get(
   '/',
   h(async (req, res) => {
-    const rows = filtered(req.query).map((r) => ({
+    const rows = filtered(req.query, req.user).map((r) => ({
       ...r,
       canCancel: ['pending_approval', 'open'].includes(r.status) && r.recovered === 0
-        && (r.created_by === req.user.id || is(req.user, 'admin')),
-      canDecide: r.status === 'pending_approval' && is(req.user, 'admin') && r.created_by !== req.user.id,
+        && (r.created_by === req.user.id || can(req.user, 'debits.approve')),
+      canDecide: r.status === 'pending_approval' && can(req.user, 'debits.approve')
+        && r.created_by !== req.user.id,
     }));
     res.json({
       rows,
@@ -82,11 +92,12 @@ router.get(
 
 router.post(
   '/',
-  allow('supervisor', 'finance'),
+  allow('debits.raise'),
   h(async (req, res) => {
     need(req.body, ['driver_id', 'kind', 'details', 'debit_date', 'reason', 'amount']);
     const driver = q.get('SELECT * FROM drivers WHERE id = ?', Number(req.body.driver_id));
     if (!driver) throw notFound('Driver not found');
+    assertDriver(req.user, driver.id);
     const kind = oneOf(req.body.kind, ['challan', 'debit'], 'kind');
     const debitDate = String(req.body.debit_date);
     if (!isDate(debitDate)) throw bad('Date of challan / debit must be YYYY-MM-DD');
@@ -112,12 +123,12 @@ router.post(
 );
 
 /**
- * Approve / reject. Admin / Director is the sole approver, and not of one they
- * raised themselves. Approved, it is open and recovered from the next salary.
+ * Approve / reject -- whoever holds the approval permission, but not on one
+ * they raised themselves. Approved, it is open and recovered from the next salary.
  */
 router.post(
   '/:id/decision',
-  allow('admin'),
+  allow('debits.approve'),
   h(async (req, res) => {
     const row = q.get('SELECT * FROM driver_debits WHERE id = ?', Number(req.params.id));
     if (!row) throw notFound('Challan / debit not found');
@@ -151,8 +162,8 @@ router.post(
     if (row.recovered > 0) {
       throw bad('Part of this has already been recovered through salary, so it cannot be cancelled');
     }
-    if (row.created_by !== req.user.id && !is(req.user, 'admin')) {
-      throw forbidden('Only the person who raised it or an Admin / Director can cancel it');
+    if (row.created_by !== req.user.id && !can(req.user, 'debits.approve')) {
+      throw forbidden('Only the person who raised it or an approver can cancel it');
     }
     const reason = String(req.body.reason || '').trim();
     if (reason.length < 3) throw bad('Record why it is being cancelled');
@@ -165,7 +176,7 @@ router.post(
 router.get(
   '/register',
   h(async (req, res) => {
-    const rows = filtered(req.query);
+    const rows = filtered(req.query, req.user);
     const buf = await buildWorkbook({
       sheetName: 'Challans & Debits',
       title: 'Challans & Debits Register',

@@ -115,7 +115,7 @@ function NotDeployed({ query }) {
                         : <span className="muted">—</span>}
                     </td>
                     <td className="right nowrap">
-                      {can('supervisor') && (
+                      {can('deployments.manage') && (
                         d.ready
                           ? <button className="sm primary" onClick={() => setDeploying(d)}>
                             {d.last_client_id ? 'Rejoin' : 'Deploy'}</button>
@@ -163,7 +163,7 @@ function Stints({ status, query }) {
               <thead>
                 <tr>
                   <th>Driver</th><th>Client ID</th><th>Date of joining</th><th>Vehicle</th>
-                  <th>Location</th><th>Salary class</th>
+                  <th>Location</th><th>Salary class</th><th>Supervisor</th>
                   {status === 'ended' && <><th>Date of leaving</th><th>Reason</th></>}
                   <th />
                 </tr>
@@ -187,12 +187,13 @@ function Stints({ status, query }) {
                     <td className="mono">{e.vehicle_number || '—'}</td>
                     <td>{e.location || '—'}</td>
                     <td>{e.salary_class || <span className="muted">—</span>}</td>
+                    <td className="small">{e.supervisor_name || <span className="chip amber">not assigned</span>}</td>
                     {status === 'ended' && <>
                       <td className="nowrap">{date(e.date_of_leaving)}</td>
                       <td className="small">{e.exit_reason || '—'}</td>
                     </>}
                     <td className="right">
-                      {e.status === 'active' && can('supervisor', 'finance') && (
+                      {e.status === 'active' && can('deployments.edit') && (
                         <button className="sm" onClick={() => setEditing(e)}>Edit</button>
                       )}
                     </td>
@@ -282,6 +283,7 @@ function EditModal({ employment, onClose, onDone }) {
     location: employment.location || '',
     salary_structure_id: employment.salary_structure_id || '',
     lsa_monthly: employment.lsa_monthly || 0,
+    supervisor_id: employment.supervisor_id ? String(employment.supervisor_id) : '',
   });
   const [busy, setBusy] = useState(false);
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
@@ -289,6 +291,7 @@ function EditModal({ employment, onClose, onDone }) {
   const structures = useAsync(() => api.get('/salary-master?active=true'), []);
   const locations = useAsync(() => api.get('/locations'), []);
   const locationList = locations.data || [];
+  const supervisors = useAsync(() => api.get('/deployments/supervisors'), []);
   // A deployment made before the list existed may sit on a site not on it.
   const offList = form.location && locationList.length
     && !locationList.some((l) => l.name === form.location);
@@ -298,6 +301,7 @@ function EditModal({ employment, onClose, onDone }) {
     try {
       const payload = { ...form };
       if (!payload.salary_structure_id) delete payload.salary_structure_id;
+      if (!payload.supervisor_id) delete payload.supervisor_id;
       if (offList && form.location === employment.location) delete payload.location;
       await api.patch(`/deployments/${employment.id}`, payload);
       onDone();
@@ -337,9 +341,17 @@ function EditModal({ employment, onClose, onDone }) {
           ))}
         </select>
       </Field>
-      <Field label="LSA / month" hint="loyalty allowance for this driver, if the structure pays one">
-        <input type="number" min={0} value={form.lsa_monthly} onChange={set('lsa_monthly')} />
-      </Field>
+      <div className="grid c2">
+        <Field label="Supervisor" hint="moving the driver hands them to that supervisor">
+          <select value={form.supervisor_id} onChange={set('supervisor_id')}>
+            {!form.supervisor_id && <option value="">— choose the supervisor —</option>}
+            {(supervisors.data || []).map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        </Field>
+        <Field label="LSA / month" hint="this driver's own amount, 0 if none">
+          <input type="number" min={0} value={form.lsa_monthly} onChange={set('lsa_monthly')} />
+        </Field>
+      </div>
     </Modal>
   );
 }

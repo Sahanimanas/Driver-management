@@ -36,7 +36,7 @@ export default function Drivers() {
     <Page
       title="Drivers"
       subtitle={data ? `${data.total} registered` : 'Registration and master records'}
-      actions={can('supervisor') && (
+      actions={can('drivers.register') && (
         <Link className="btn primary" to="/drivers/new">+ Register driver</Link>
       )}
     >

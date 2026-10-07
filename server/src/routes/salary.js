@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import { Router } from 'express';
 import { q, tx, audit } from '../db.js';
 import { authenticate, allow } from '../auth.js';
+import { employmentScope } from '../scope.js';
 import { config } from '../config.js';
 import { upload, saveBuffer } from '../files.js';
 import { buildWorkbook, readWorkbook, XLSX_MIME } from '../excel.js';
@@ -76,7 +77,7 @@ router.get(
  */
 router.post(
   '/periods/:period/collate',
-  allow('finance'),
+  allow('payroll.manage'),
   h(async (req, res) => {
     const period = req.params.period;
     const row = getPeriod(period, { create: true, userId: req.user.id });
@@ -211,6 +212,8 @@ router.get(
     const row = getPeriod(period);
     if (!row) return res.json({ period: null, rows: [], totals: null });
 
+    // A supervisor sees the lines of the drivers deployed under them.
+    const scope = employmentScope(req.user);
     const rows = q.all(
       `SELECT l.*, d.id AS driver_id, d.name, d.registration_no, d.bank_account_no, d.bank_ifsc,
               d.bank_name, d.bank_account_name, e.client_id, e.location, e.vehicle_number,
@@ -218,8 +221,8 @@ router.get(
        FROM payroll_lines l
        JOIN employments e ON e.id = l.employment_id
        JOIN drivers d ON d.id = e.driver_id
-       WHERE l.period_id = ? ORDER BY e.location, d.name`,
-      row.id,
+       WHERE l.period_id = ? AND ${scope.sql} ORDER BY e.location, d.name`,
+      row.id, ...scope.params,
     );
 
     const totals = rows.reduce(
@@ -244,7 +247,7 @@ router.get(
 /** Confirm the collated attendance with the client. */
 router.post(
   '/periods/:period/finalize-attendance',
-  allow('finance'),
+  allow('payroll.manage'),
   h(async (req, res) => {
     const row = getPeriod(req.params.period);
     if (!row) throw notFound('Payroll period not found — collate it first');
@@ -263,7 +266,7 @@ router.post(
 /** Edit a single payment line: correct attendance, hold, or adjust deductions. */
 router.patch(
   '/lines/:id',
-  allow('finance'),
+  allow('payroll.manage'),
   h(async (req, res) => {
     const line = q.get('SELECT * FROM payroll_lines WHERE id = ?', Number(req.params.id));
     if (!line) throw notFound('Payment line not found');
@@ -486,7 +489,7 @@ router.get(
  */
 router.get(
   '/periods/:period/enet-sheet',
-  allow('finance'),
+  allow('payroll.manage'),
   h(async (req, res) => {
     const period = req.params.period;
     const row = getPeriod(period);
@@ -538,7 +541,7 @@ router.get(
 /** Record payment against individual drivers. */
 router.post(
   '/periods/:period/record-payments',
-  allow('finance'),
+  allow('payroll.manage'),
   h(async (req, res) => {
     const row = getPeriod(req.params.period);
     if (!row) throw notFound('Payroll period not found');
@@ -633,7 +636,7 @@ function settleRecoveriesFor(periodId) {
  */
 router.post(
   '/periods/:period/bank-statement',
-  allow('finance'),
+  allow('payroll.manage'),
   upload.single('file'),
   h(async (req, res) => {
     const row = getPeriod(req.params.period);
@@ -711,7 +714,7 @@ router.post(
 
 router.post(
   '/periods/:period/close',
-  allow('finance'),
+  allow('payroll.manage'),
   h(async (req, res) => {
     const row = getPeriod(req.params.period);
     if (!row) throw notFound('Payroll period not found');

@@ -39,8 +39,10 @@ export function AuthProvider({ children }) {
         setToken(null);
         setUser(null);
       },
-      /** Admin passes every role check. */
-      can: (...roles) => Boolean(user && (user.role === 'admin' || roles.includes(user.role))),
+      /** Holds any of these permissions (see server/src/roles.js). Admin holds them all. */
+      can: (...perms) => Boolean(
+        user && (user.role === 'admin' || perms.some((p) => user.permissions?.includes(p))),
+      ),
     }),
     [user, ready],
   );

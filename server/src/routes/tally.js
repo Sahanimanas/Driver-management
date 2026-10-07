@@ -8,7 +8,7 @@ import { h, bad, isDate, today, money, addDays, oneOf } from '../util.js';
 
 const router = Router();
 router.use(authenticate);
-router.use(allow('finance'));
+router.use(allow('tally.post'));
 
 /** Monday-to-Sunday window containing `date` — the weekly Tally update cycle. */
 function weekOf(date) {

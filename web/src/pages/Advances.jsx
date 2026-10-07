@@ -12,14 +12,14 @@ import DebitModal from '../components/DebitModal.jsx';
 export default function Advances() {
   const { can, user } = useAuth();
   const [tab, setTab] = useState(
-    can('finance') && user.role === 'finance' ? 'payments' : 'requests',
+    can('advances.pay') && !can('advances.approve') ? 'payments' : 'requests',
   );
 
   return (
     <Page title="Salary advances" subtitle="Raised by supervisors, approved by Admin / Director, paid by Finance">
       <div className="tabs">
         <button className={tab === 'requests' ? 'active' : ''} onClick={() => setTab('requests')}>Requests</button>
-        {can('finance') && (
+        {can('advances.pay') && (
           <>
             <button className={tab === 'payments' ? 'active' : ''} onClick={() => setTab('payments')}>Payment runs</button>
             <button className={tab === 'batches' ? 'active' : ''} onClick={() => setTab('batches')}>Past runs</button>
@@ -73,7 +73,7 @@ function Requests() {
           <option value="">All</option>
         </select>
         <div className="spacer" />
-        {can('supervisor') && (
+        {can('advances.raise') && (
           <button className="primary" onClick={() => setNewOpen(true)}>+ Raise request</button>
         )}
       </div>
@@ -832,7 +832,7 @@ function Register() {
 function Debits() {
   const { can } = useAuth();
   const toast = useToast();
-  const [status, setStatus] = useState(can('admin') ? 'pending_approval' : 'open');
+  const [status, setStatus] = useState(can('debits.approve') ? 'pending_approval' : 'open');
   const [raising, setRaising] = useState(false);
   const [cancelling, setCancelling] = useState(null);
   const [deciding, setDeciding] = useState(null);
@@ -862,7 +862,7 @@ function Debits() {
         <button onClick={() => api.download(`/debits/register?status=${status}`, 'challans-debits.xlsx')}>
           ⭳ Download register
         </button>
-        {can('supervisor', 'finance') && (
+        {can('debits.raise') && (
           <button className="primary" onClick={() => setRaising(true)}>+ Challan / debit</button>
         )}
       </div>

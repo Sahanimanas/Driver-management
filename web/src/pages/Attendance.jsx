@@ -26,7 +26,7 @@ export default function Attendance() {
     [period, location, search],
   );
 
-  const editable = can('supervisor');
+  const editable = can('attendance.mark');
   const pendingCount = Object.keys(pending).length;
 
   const days = data?.days || [];
