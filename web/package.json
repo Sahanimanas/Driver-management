@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "start": "vite build || echo '[warn] vite build failed - serving previous dist'; vite preview",
     "preview": "vite preview"
   },
   "dependencies": {

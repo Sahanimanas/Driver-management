@@ -104,7 +104,7 @@ export default function Settings() {
 
         <div className="grid c2" style={{ marginTop: 12 }}>
           <Field label="Application name" hint="shown in the sidebar and the browser tab">
-            <input value={form.app_name} onChange={set('app_name')} maxLength={40} placeholder="Quantum" />
+            <input value={form.app_name} onChange={set('app_name')} maxLength={40} placeholder="DIMAC" />
           </Field>
           <Field label="Tagline">
             <input value={form.app_tagline} onChange={set('app_tagline')} maxLength={80}

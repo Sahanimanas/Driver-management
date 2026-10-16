@@ -69,7 +69,7 @@ export const config = {
   // Branding. The client is supplying the trading name and the logo; both are
   // editable at runtime from Settings, and these are only the fallbacks.
   branding: {
-    appName: process.env.APP_NAME || 'Quantum',
+    appName: process.env.APP_NAME || 'DIMAC',
     tagline: process.env.APP_TAGLINE || 'Driver Attendance & Management',
   },
 };

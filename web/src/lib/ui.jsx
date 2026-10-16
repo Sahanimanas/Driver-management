@@ -60,7 +60,7 @@ export const useAuth = () => useContext(AuthCtx);
  */
 const BrandCtx = createContext(null);
 
-const FALLBACK_BRAND = { appName: 'Quantum', tagline: 'Driver Attendance & Management', logoUrl: null };
+const FALLBACK_BRAND = { appName: 'DIMAC', tagline: 'Driver Attendance & Management', logoUrl: null };
 
 export function BrandingProvider({ children }) {
   const [brand, setBrand] = useState(FALLBACK_BRAND);

@@ -33,51 +33,102 @@ function migrateLegacy() {
     }
     return false;
   };
+  /** COALESCE over whichever of these columns the old table actually has. */
+  const pick = (table, ...candidates) => {
+    const present = candidates.filter((c) => columns(table).includes(c));
+    if (!present.length) return 'NULL';
+    return present.length === 1 ? present[0] : `COALESCE(${present.join(', ')})`;
+  };
+  // One broken step must not abort the rest of the migration.
+  const step = (name, fn) => {
+    try {
+      fn();
+    } catch (err) {
+      console.error(`[db] legacy migration step "${name}" failed:`, err.message);
+    }
+  };
+
+  // --- a rename that was interrupted half way --------------------------------
+  step('users rename rollback', () => {
+    if (tableSql('users_legacy') && !tableSql('users')) {
+      db.exec('ALTER TABLE users_legacy RENAME TO users');
+    }
+  });
+
+  // --- foreign keys left pointing at the temporary name ----------------------
+  // An earlier build renamed `users` without suspending SQLite's reference
+  // rewriting, so every referencing table ended up with REFERENCES
+  // "users_legacy"(id); dropping the temporary table left those dangling and
+  // every insert failed with `no such table: main.users_legacy`. The stored DDL
+  // is patched back in place — no data moves.
+  step('users_legacy reference repair', () => {
+    if (tableSql('users_legacy')) return; // mid-migration; nothing to repair yet
+    const stale = db
+      .prepare(
+        `SELECT count(*) AS n FROM sqlite_master
+          WHERE sql LIKE '%"users_legacy"%' AND name <> 'users_legacy'`,
+      )
+      .get().n;
+    if (!stale) return;
+    const version = db.prepare('PRAGMA schema_version').get().schema_version;
+    db.exec(`
+      PRAGMA writable_schema = ON;
+      UPDATE sqlite_master SET sql = replace(sql, '"users_legacy"', 'users')
+       WHERE sql LIKE '%"users_legacy"%' AND name <> 'users_legacy';
+      PRAGMA schema_version = ${version + 1};
+      PRAGMA writable_schema = OFF;
+    `);
+    console.error(`[db] repaired ${stale} table(s) still referencing users_legacy`);
+  });
 
   // --- new columns on existing tables --------------------------------------
-  addColumn('drivers', 'referred_by TEXT', 'referred_by');
-  addColumn('drivers', 'scan_id TEXT', 'scan_id');
-  addColumn('drivers', 'rejection_reason TEXT', 'rejection_reason');
-  addColumn('drivers', 'rejected_on TEXT', 'rejected_on');
-  addColumn('drivers', 'bank_branch TEXT', 'bank_branch');
-  addColumn('drivers', 'aadhar_back_doc_id TEXT', 'aadhar_back_doc_id');
-  addColumn('drivers', 'dl_back_doc_id TEXT', 'dl_back_doc_id');
-  addColumn('drivers', 'bank_proof_doc_id TEXT', 'bank_proof_doc_id');
-  addColumn('drivers', 'blacklisted INTEGER NOT NULL DEFAULT 0', 'blacklisted');
-  addColumn('drivers', 'blacklisted_on TEXT', 'blacklisted_on');
-  addColumn('drivers', 'blacklist_reason TEXT', 'blacklist_reason');
-  addColumn('drivers', 'blacklisted_by INTEGER', 'blacklisted_by');
-  addColumn('payroll_lines', 'debit_deduction REAL NOT NULL DEFAULT 0', 'debit_deduction');
-  // Lines paid before this flag existed have already had their recovery
-  // applied; marking them settled stops the next payment run applying it again.
-  if (addColumn('payroll_lines', 'recovery_settled INTEGER NOT NULL DEFAULT 0', 'recovery_settled')) {
-    db.exec("UPDATE payroll_lines SET recovery_settled = 1 WHERE status = 'paid'");
-  }
-  addColumn('employments', 'salary_structure_id INTEGER', 'salary_structure_id');
-  addColumn('payroll_lines', 'salary_structure_id INTEGER', 'salary_structure_id');
-  addColumn('payroll_lines', 'structure_code TEXT', 'structure_code');
-  addColumn('payroll_lines', 'earnings_json TEXT', 'earnings_json');
-  addColumn('payroll_lines', 'deductions_json TEXT', 'deductions_json');
-  addColumn('payroll_lines', 'statutory_deduction REAL NOT NULL DEFAULT 0', 'statutory_deduction');
+  step('added columns', () => {
+    addColumn('drivers', 'referred_by TEXT', 'referred_by');
+    addColumn('drivers', 'scan_id TEXT', 'scan_id');
+    addColumn('drivers', 'rejection_reason TEXT', 'rejection_reason');
+    addColumn('drivers', 'rejected_on TEXT', 'rejected_on');
+    addColumn('drivers', 'bank_branch TEXT', 'bank_branch');
+    addColumn('drivers', 'aadhar_back_doc_id TEXT', 'aadhar_back_doc_id');
+    addColumn('drivers', 'dl_back_doc_id TEXT', 'dl_back_doc_id');
+    addColumn('drivers', 'bank_proof_doc_id TEXT', 'bank_proof_doc_id');
+    addColumn('drivers', 'blacklisted INTEGER NOT NULL DEFAULT 0', 'blacklisted');
+    addColumn('drivers', 'blacklisted_on TEXT', 'blacklisted_on');
+    addColumn('drivers', 'blacklist_reason TEXT', 'blacklist_reason');
+    addColumn('drivers', 'blacklisted_by INTEGER', 'blacklisted_by');
+    addColumn('payroll_lines', 'debit_deduction REAL NOT NULL DEFAULT 0', 'debit_deduction');
+    // Lines paid before this flag existed have already had their recovery
+    // applied; marking them settled stops the next payment run applying it again.
+    if (addColumn('payroll_lines', 'recovery_settled INTEGER NOT NULL DEFAULT 0', 'recovery_settled')) {
+      db.exec("UPDATE payroll_lines SET recovery_settled = 1 WHERE status = 'paid'");
+    }
+    addColumn('employments', 'salary_structure_id INTEGER', 'salary_structure_id');
+    addColumn('payroll_lines', 'salary_structure_id INTEGER', 'salary_structure_id');
+    addColumn('payroll_lines', 'structure_code TEXT', 'structure_code');
+    addColumn('payroll_lines', 'earnings_json TEXT', 'earnings_json');
+    addColumn('payroll_lines', 'deductions_json TEXT', 'deductions_json');
+    addColumn('payroll_lines', 'statutory_deduction REAL NOT NULL DEFAULT 0', 'statutory_deduction');
+  });
 
   // --- the client pay registers: component rules, billing, per-driver LSA ---
-  addColumn('salary_components', "rounding TEXT NOT NULL DEFAULT 'none'", 'rounding');
-  addColumn('salary_components', "basis TEXT NOT NULL DEFAULT 'earned'", 'basis');
-  addColumn('salary_components', 'cap REAL NOT NULL DEFAULT 0', 'cap');
-  addColumn('salary_components', 'condition TEXT', 'condition');
-  addColumn('salary_components', 'employer INTEGER NOT NULL DEFAULT 0', 'employer');
-  addColumn('salary_components', 'per_driver INTEGER NOT NULL DEFAULT 0', 'per_driver');
-  addColumn('salary_components', 'is_basic INTEGER NOT NULL DEFAULT 0', 'is_basic');
-  addColumn('salary_structures', 'service_charge REAL NOT NULL DEFAULT 0', 'service_charge');
-  addColumn('salary_structures', 'gst_rate REAL NOT NULL DEFAULT 18', 'gst_rate');
-  addColumn('salary_structures', 'tds_rate REAL NOT NULL DEFAULT 0', 'tds_rate');
-  addColumn('salary_structures', "register_format TEXT NOT NULL DEFAULT 'standard'", 'register_format');
-  addColumn('salary_structures', 'role_label TEXT', 'role_label');
-  addColumn('employments', 'lsa_monthly REAL NOT NULL DEFAULT 0', 'lsa_monthly');
-  addColumn('payroll_lines', 'employer_cost REAL NOT NULL DEFAULT 0', 'employer_cost');
-  addColumn('payroll_lines', 'ctc REAL NOT NULL DEFAULT 0', 'ctc');
-  addColumn('payroll_lines', 'employer_json TEXT', 'employer_json');
-  addColumn('payroll_lines', 'billing_json TEXT', 'billing_json');
+  step('pay register columns', () => {
+    addColumn('salary_components', "rounding TEXT NOT NULL DEFAULT 'none'", 'rounding');
+    addColumn('salary_components', "basis TEXT NOT NULL DEFAULT 'earned'", 'basis');
+    addColumn('salary_components', 'cap REAL NOT NULL DEFAULT 0', 'cap');
+    addColumn('salary_components', 'condition TEXT', 'condition');
+    addColumn('salary_components', 'employer INTEGER NOT NULL DEFAULT 0', 'employer');
+    addColumn('salary_components', 'per_driver INTEGER NOT NULL DEFAULT 0', 'per_driver');
+    addColumn('salary_components', 'is_basic INTEGER NOT NULL DEFAULT 0', 'is_basic');
+    addColumn('salary_structures', 'service_charge REAL NOT NULL DEFAULT 0', 'service_charge');
+    addColumn('salary_structures', 'gst_rate REAL NOT NULL DEFAULT 18', 'gst_rate');
+    addColumn('salary_structures', 'tds_rate REAL NOT NULL DEFAULT 0', 'tds_rate');
+    addColumn('salary_structures', "register_format TEXT NOT NULL DEFAULT 'standard'", 'register_format');
+    addColumn('salary_structures', 'role_label TEXT', 'role_label');
+    addColumn('employments', 'lsa_monthly REAL NOT NULL DEFAULT 0', 'lsa_monthly');
+    addColumn('payroll_lines', 'employer_cost REAL NOT NULL DEFAULT 0', 'employer_cost');
+    addColumn('payroll_lines', 'ctc REAL NOT NULL DEFAULT 0', 'ctc');
+    addColumn('payroll_lines', 'employer_json TEXT', 'employer_json');
+    addColumn('payroll_lines', 'billing_json TEXT', 'billing_json');
+  });
 
   // --- challans / debits gain an approval step -----------------------------
   // Those already on record stay as they are (open ones keep being recovered).
@@ -114,7 +165,8 @@ function migrateLegacy() {
   }
 
   // --- users: five roles collapse to three ---------------------------------
-  if (columns('users').length && tableSql('users').includes('senior_manager')) {
+  step('user roles', () => {
+    if (!columns('users').length || !tableSql('users').includes('senior_manager')) return;
     db.exec(`
       ALTER TABLE users RENAME TO users_legacy;
       CREATE TABLE users (
@@ -139,7 +191,7 @@ function migrateLegacy() {
         FROM users_legacy;
       DROP TABLE users_legacy;
     `);
-  }
+  });
 
   // --- users: the role is any roles.key, not one of three fixed values ------
   if (columns('users').length && /CHECK\s*\(\s*role\s+IN/i.test(tableSql('users'))) {
@@ -169,26 +221,92 @@ function migrateLegacy() {
   }
 
   // --- advances / expenses: two approval steps collapse to one -------------
-  for (const [table, extra] of [['advances', 'paid'], ['expenses', 'settled']]) {
-    const cols = columns(table);
-    if (!cols.length || !cols.includes('sm_by')) continue;
-    addColumn(table, 'approved_by INTEGER', 'approved_by');
-    addColumn(table, 'approved_at TEXT', 'approved_at');
-    addColumn(table, 'approval_remarks TEXT', 'approval_remarks');
-    // The last decision on record becomes the single approval.
-    db.exec(`
-      UPDATE ${table} SET
-        approved_by      = COALESCE(director_by, sm_by),
-        approved_at      = COALESCE(director_at, sm_at),
-        approval_remarks = COALESCE(director_remarks, sm_remarks)
-      WHERE approved_by IS NULL;
-      UPDATE ${table} SET status = 'pending_approval'
-       WHERE status IN ('pending_sm', 'pending_director');
-    `);
-    for (const c of ['sm_by', 'sm_at', 'sm_remarks', 'director_by', 'director_at', 'director_remarks']) {
-      if (columns(table).includes(c)) db.exec(`ALTER TABLE ${table} DROP COLUMN ${c}`);
-    }
-    void extra;
+  // The old tables carry a CHECK constraint that rejects 'pending_approval', so
+  // the status cannot simply be updated in place: both are rebuilt against the
+  // current shape, with the last decision on record becoming the single
+  // approval.
+  const REBUILDS = {
+    advances: {
+      ddl: `CREATE TABLE advances (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        driver_id         INTEGER NOT NULL REFERENCES drivers(id),
+        employment_id     INTEGER REFERENCES employments(id),
+        amount            REAL    NOT NULL CHECK (amount > 0),
+        reason            TEXT    NOT NULL,
+        request_date      TEXT    NOT NULL,
+        status            TEXT    NOT NULL DEFAULT 'pending_approval'
+                          CHECK (status IN ('pending_approval','approved','rejected','paid')),
+        requested_by      INTEGER NOT NULL REFERENCES users(id),
+        requested_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+        approved_by       INTEGER REFERENCES users(id),
+        approved_at       TEXT,
+        approval_remarks  TEXT,
+        cutoff            TEXT,
+        batch_id          INTEGER REFERENCES payment_batches(id),
+        paid_at           TEXT,
+        utr               TEXT,
+        recovered         REAL    NOT NULL DEFAULT 0,
+        tally_export_id   INTEGER
+      )`,
+      carried: [
+        'id', 'driver_id', 'employment_id', 'amount', 'reason', 'request_date',
+        'cutoff', 'batch_id', 'paid_at', 'utr', 'recovered', 'tally_export_id',
+      ],
+    },
+    expenses: {
+      ddl: `CREATE TABLE expenses (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        driver_id        INTEGER REFERENCES drivers(id),
+        purpose          TEXT    NOT NULL,
+        category         TEXT,
+        amount           REAL    NOT NULL CHECK (amount > 0),
+        kind             TEXT    NOT NULL CHECK (kind IN ('reimbursement','expense')),
+        route            TEXT    NOT NULL CHECK (route IN ('petty_cash','accounts')),
+        request_date     TEXT    NOT NULL,
+        status           TEXT    NOT NULL DEFAULT 'pending_approval'
+                         CHECK (status IN ('pending_approval','approved','rejected','settled')),
+        requested_by     INTEGER NOT NULL REFERENCES users(id),
+        requested_at     TEXT    NOT NULL DEFAULT (datetime('now')),
+        approved_by      INTEGER REFERENCES users(id),
+        approved_at      TEXT,
+        approval_remarks TEXT,
+        settled_at       TEXT,
+        settled_by       INTEGER REFERENCES users(id),
+        paid_amount      REAL,
+        txn_ref          TEXT,
+        batch_id         INTEGER REFERENCES payment_batches(id)
+      )`,
+      carried: [
+        'id', 'driver_id', 'purpose', 'category', 'amount', 'kind', 'route',
+        'request_date', 'settled_at', 'settled_by', 'paid_amount', 'txn_ref', 'batch_id',
+      ],
+    },
+  };
+
+  for (const [table, { ddl, carried }] of Object.entries(REBUILDS)) {
+    step(`${table} single approval`, () => {
+      if (!columns(table).includes('sm_by')) return;
+      const target = [
+        ...carried,
+        'status', 'requested_by', 'requested_at',
+        'approved_by', 'approved_at', 'approval_remarks',
+      ];
+      const source = [
+        ...carried,
+        `CASE WHEN status IN ('pending_sm','pending_director') THEN 'pending_approval' ELSE status END`,
+        'requested_by', 'requested_at',
+        pick(table, 'approved_by', 'director_by', 'sm_by'),
+        pick(table, 'approved_at', 'director_at', 'sm_at'),
+        pick(table, 'approval_remarks', 'director_remarks', 'sm_remarks'),
+      ];
+      db.exec(`
+        ALTER TABLE ${table} RENAME TO ${table}_legacy;
+        ${ddl};
+        INSERT INTO ${table} (${target.join(', ')})
+          SELECT ${source.join(', ')} FROM ${table}_legacy;
+        DROP TABLE ${table}_legacy;
+      `);
+    });
   }
 }
 
@@ -216,7 +334,9 @@ function repairLegacyReferences() {
 }
 
 // Rebuilding a table with foreign keys pointing at it needs the constraint
-// enforcement suspended; schema.sql turns it straight back on.
+// enforcement suspended, and `legacy_alter_table` keeps SQLite from rewriting
+// other tables' REFERENCES clauses when a table is renamed out of the way.
+// schema.sql turns foreign keys straight back on.
 db.exec('PRAGMA foreign_keys = OFF');
 db.exec('PRAGMA legacy_alter_table = ON');
 try {
