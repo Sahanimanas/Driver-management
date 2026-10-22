@@ -13,7 +13,7 @@ npm run test:extraction -- testing_docs/AJAY.pdf # just one
 
 | File | What it is | What the extractor should get |
 | --- | --- | --- |
-| `AJAY.pdf` | A real client page — the GreenLine vendor portal driver list, sent through "Print to PDF". Image only: no text layer, 22 drivers on one page. | 22 driver rows with names and registration numbers, offered as a pick-list |
+| `AJAY.pdf` | A real client page — the GreenLine vendor portal's "Employee Registration Details" popup for one driver, drawn over the driver list and sent through "Print to PDF". No text layer: the popup's text is vector shapes, and the only embedded image is the list behind it. | The popup's fields — register no., name, DOB, mobile, location, company, family — read by Tesseract from the rendered page |
 | `sample-registration-form.txt` | A single-driver registration form as labelled text, the shape a per-driver page takes | 21 fields — name, Aadhaar, licence, bank, UAN, references, referred by |
 
 Each document may have a `<name>.expected.json` beside it. That file holds only
@@ -31,8 +31,10 @@ The pipeline picks its route from what the file actually is, not its extension:
 1. **PDF with a text layer** — the text is read straight off it. Instant, exact,
    no OCR involved.
 2. **PDF without one** — a scan, or a browser page sent through "Print to PDF".
-   The embedded page images are pulled out and read by OCR, largest first.
-   `AJAY.pdf` is this case.
+   Each page is rendered at 300 dpi (pdf.js) and read by Tesseract. The whole
+   page is rendered rather than its embedded images pulled out, because on the
+   portal's popup pages the largest image is the driver list *behind* the
+   popup. `AJAY.pdf` is this case.
 3. **An image** — read by OCR.
 4. **Pasted text** — parsed as-is. This is the fallback that always works.
 
@@ -53,10 +55,21 @@ tag so the supervisor knows how much to trust it:
 it, corrects it, and fills in whatever came back blank. That is the scope's
 "fields which are blank should be populated manually by supervisor".
 
-## A note on the client page
+## The two client pages
 
-`AJAY.pdf` is a *list* of drivers, not one driver's form, and the portal
-truncates long values with an ellipsis before printing. So:
+**Employee Registration Details** (one driver). Printed two ways: as a wide page
+with every label on one line (usually with a text layer), and as the narrow
+popup over the driver list, where labels wrap onto two lines ("Mobile / No.",
+"DL To / Date") and the value sits between them. Both are read by finding each
+label and taking the value to its right at the same height, stopping at the
+next label — see `server/src/extract/details.js`. The family rows become the
+reference contacts; a family member whose number is the driver's own is left
+out. The DOB is filled as the Aadhar DOB only: the licence DOB is left for the
+supervisor to type from the licence, so the two can still be checked against
+each other.
+
+**Driver list** (many drivers). Read as rows and offered as a pick-list. The
+portal truncates long values with an ellipsis before printing, so:
 
 - Names come back complete for most rows; a row the portal cut off is flagged
   `nameTruncated` and shown as "name cut off" in the pick-list.

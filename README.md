@@ -83,14 +83,22 @@ what the file actually is:
 
 | Input | How it is read |
 | --- | --- |
-| PDF with a text layer | Read straight off it. Instant, exact, no OCR. |
-| PDF without one (a scan, or "Print to PDF") | Embedded page images are pulled out and read by OCR |
-| An image | Read by OCR |
+| PDF with a text layer | Read straight off it with pdf.js. Instant, exact, no OCR. |
+| PDF without one (a scan, or "Print to PDF") | Each page is rendered at 300 dpi and read by Tesseract OCR |
+| An image | Read by Tesseract OCR |
 | Pasted text | Parsed as-is — the fallback that always works |
 
-OCR runs in-process, so this works with no external service; set `OCR_API_URL`
-to prefer a remote one. A client page that lists many drivers comes back as a
-**pick-list** — choose the driver being registered and the form fills in.
+OCR runs in-process (`tesseract.js`), so this works with no external service;
+set `OCR_API_URL` to prefer a remote one.
+
+The portal's **Employee Registration Details** page (one driver) fills the form
+directly: name, mobile, Aadhar, DOB, address, licence number and validity, UAN,
+bank details and the family members as reference contacts. It is read in both
+of the layouts the portal prints — the wide page, and the narrow popup over the
+driver list whose labels wrap onto two lines — by finding each label and the
+value beside it, not by trusting line breaks. A client page that *lists* many
+drivers comes back as a **pick-list** instead — choose the driver being
+registered and the form fills in.
 
 Every value is a *suggestion*, tagged with how it was found (`labelled`,
 `pattern`, `derived`) and highlighted in the form. Nothing is saved by scanning;

@@ -103,7 +103,7 @@ function pickText(data) {
 
 /**
  * Read one image.
- * @returns {Promise<{text: string, engine: string, confidence: number|null, error?: string}>}
+ * @returns {Promise<{text: string, words?: Array, engine: string, confidence: number|null, error?: string}>}
  */
 export async function ocrBuffer(buffer, mime, filename) {
   if (config.ocr.url) {
@@ -119,10 +119,13 @@ export async function ocrBuffer(buffer, mime, filename) {
   if (worker) {
     try {
       const { data } = await withTimeout(
-        worker.recognize(buffer), config.ocr.timeoutMs, 'Reading the page',
+        worker.recognize(buffer, {}, { text: true, blocks: true }),
+        config.ocr.timeoutMs,
+        'Reading the page',
       );
       return {
         text: data.text || '',
+        words: wordsOf(data.blocks),
         engine: 'local',
         confidence: typeof data.confidence === 'number' ? data.confidence : null,
       };
@@ -133,6 +136,21 @@ export async function ocrBuffer(buffer, mime, filename) {
   }
 
   return { text: '', engine: 'none', confidence: null };
+}
+
+/** Tesseract's blocks flattened to positioned words (see layout.js). */
+function wordsOf(blocks) {
+  const words = [];
+  for (const b of blocks || []) {
+    for (const p of b.paragraphs || []) {
+      for (const l of p.lines || []) {
+        for (const w of l.words || []) {
+          if (w.text?.trim()) words.push({ text: w.text.trim(), ...w.bbox });
+        }
+      }
+    }
+  }
+  return words;
 }
 
 /** Which engines this server can actually use right now. */

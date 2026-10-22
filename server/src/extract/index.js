@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { readPdf, isPdf } from './pdf.js';
+import { readPdfPages } from './render.js';
 import { ocrBuffer, ocrStatus } from './ocr.js';
 import { parseRegistrationText, mergeExtractions } from './parse.js';
 
@@ -13,10 +14,11 @@ export { closeOcr } from './ocr.js';
  * One file in, a registration draft out. The route the file takes depends on
  * what it actually is:
  *
- *   PDF with a text layer  -> read the text straight off it. Instant, exact.
- *   PDF without one        -> pull the embedded page images out and OCR them.
+ *   PDF with a text layer  -> read the text straight off it (pdf.js). Exact.
+ *   PDF without one        -> render each page and read it with Tesseract.
  *                             This is what a scan, or a browser page sent
- *                             through "Print to PDF", looks like.
+ *                             through "Print to PDF", looks like. Without
+ *                             pdf.js, the embedded page images are OCR'd.
  *   Image                  -> OCR it.
  *   Text pasted by hand    -> parse it as-is.
  *
@@ -28,8 +30,9 @@ export { closeOcr } from './ocr.js';
 
 const IMAGE_MIME = /^image\//;
 
-/** How many page images of a PDF to read before calling it a day. */
-const MAX_PDF_IMAGES = 4;
+/** How many pages (or page images) of a PDF to read before calling it a day. */
+const MAX_PDF_PAGES = 4;
+const MAX_PDF_IMAGES = MAX_PDF_PAGES;
 
 export async function extractFromFile(filePath, mime, originalName) {
   const buf = fs.readFileSync(filePath);
@@ -42,7 +45,38 @@ export async function extractFromBuffer(buf, mime, name = 'document') {
   let engine = 'none';
   let note = null;
 
-  if (isPdf(buf) || mime === 'application/pdf') {
+  const pdfPages = isPdf(buf) || mime === 'application/pdf' ? await readPdfPages(buf, { maxPages: MAX_PDF_PAGES }) : null;
+
+  if (pdfPages) {
+    // Page by page: the text layer where there is one, otherwise the rendered
+    // page read by OCR.
+    for (const p of pdfPages.pages) {
+      const where = pdfPages.numPages > 1 ? `page ${p.number}` : 'page';
+      if (!p.png) {
+        pages.push({ source: `${name} (${where}, text layer)`, text: p.text, words: p.words, engine: 'pdf-text', confidence: 100 });
+        if (engine === 'none') engine = 'pdf-text';
+        continue;
+      }
+      const out = await ocrBuffer(p.png, 'image/png', `${name}-p${p.number}.png`);
+      if (out.engine !== 'none' || engine === 'none') engine = out.engine;
+      if (out.text.trim()) {
+        pages.push({
+          source: `${name} (${where}, OCR)`,
+          text: out.text,
+          words: out.words,
+          engine: out.engine,
+          confidence: out.confidence,
+        });
+      }
+    }
+    if (!pages.length) {
+      note =
+        `${name} is a scanned PDF and no OCR engine was able to read it. `
+        + 'Install the local engine (npm install in server/), point OCR_API_URL at a service, '
+        + 'or paste the text from the page.';
+    }
+  } else if (isPdf(buf) || mime === 'application/pdf') {
+    // pdf.js is not available: fall back to the built-in reader.
     const pdf = readPdf(buf);
 
     if (pdf.hasTextLayer) {
@@ -84,7 +118,7 @@ export async function extractFromBuffer(buf, mime, name = 'document') {
     const out = await ocrBuffer(buf, mime, name);
     engine = out.engine;
     if (out.text.trim()) {
-      pages.push({ source: name, text: out.text, engine: out.engine, confidence: out.confidence });
+      pages.push({ source: name, text: out.text, words: out.words, engine: out.engine, confidence: out.confidence });
     } else {
       note =
         `No text could be read from ${name}. `
@@ -110,7 +144,10 @@ export function extractFromText(text, name = 'pasted text') {
 }
 
 function summarise(pages, { engine, note, name }) {
-  const parsed = pages.map((p) => ({ ...parseRegistrationText(p.text, { engine: p.engine }), source: p.source }));
+  const parsed = pages.map((p) => ({
+    ...parseRegistrationText(p.text, { engine: p.engine, words: p.words }),
+    source: p.source,
+  }));
   const merged = mergeExtractions(parsed);
 
   // Rows found on a client page, de-duplicated across the pages of the file.

@@ -1,23 +1,11 @@
 {
-  "docType": "client_page",
-  "rows": [
-    "AJAY KUMAR",
-    "PANKAJ KUMAR",
-    "JEEVAN SINGH",
-    "SIYA RAM",
-    "SURAJ KUMAR",
-    "AMAN KUMAR",
-    "SANDEEP KUMAR",
-    "SUNIL KUMAR PAL",
-    "ANOJ KUMAR",
-    "Amarjeet Kumar",
-    "Mohd Wahid Ali",
-    "SURESH KUMAR",
-    "RAMLAKHAN",
-    "KALI PRASAD",
-    "SATYAM",
-    "MONU",
-    "SONU",
-    "RANJEET KUMAR"
-  ]
+  "docType": "registration_details",
+  "rowCount": 0,
+  "registered_no": "202512251146327",
+  "name": "AJAY KUMAR",
+  "dob_aadhar": "2000-12-15",
+  "phone": "7043287689",
+  "location": "Pune",
+  "company": "GREENLINE MOBILITY SOLUTIONS LIMITED",
+  "father_name": "PRAMOD RAY"
 }

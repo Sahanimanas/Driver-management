@@ -1,4 +1,6 @@
 import { digits } from '../util.js';
+import { parseDetailsPage } from './details.js';
+import { wordsFromText } from './layout.js';
 
 /**
  * Turn the text read off a document into registration fields.
@@ -17,6 +19,9 @@ import { digits } from '../util.js';
 
 // ------------------------------------------------------------ document type
 const DOC_SIGNATURES = [
+  // The portal's one-driver page. First, because it also mentions Aadhar and
+  // "DL No." and would otherwise pass for an Aadhaar card or a licence.
+  ['registration_details', /(employee registration (details|report)|personal details|family details|document details)/i],
   ['aadhaar', /(unique identification authority|भारत सरकार|government of india|आधार|aadhaar)/i],
   ['licence', /(driving licen[cs]e|transport department|form\s*7|cov\b|dl\s*no)/i],
   ['bank', /(ifsc|passbook|branch code|account holder|micr)/i],
@@ -75,13 +80,30 @@ const REF_RE =
  * @param {string} text        text read off the document
  * @param {object} [opts]
  * @param {string} [opts.engine]  which OCR engine produced it, for the report
+ * @param {Array}  [opts.words]   the same text as positioned words, when the
+ *                                reader kept them (see layout.js)
  * @returns {{fields: object, confidence: object, matched: number, docType: string}}
  */
 export function parseRegistrationText(text, opts = {}) {
   const src = normalise(text);
+  const { type, signals } = classify(src);
+
+  // The portal's details page is a grid of columns, read by position.
+  if (type === 'registration_details') {
+    const { fields, confidence } = parseDetailsPage(opts.words?.length ? opts.words : wordsFromText(text));
+    return {
+      fields,
+      confidence,
+      rows: [],
+      matched: Object.keys(fields).length,
+      docType: type,
+      signals,
+      engine: opts.engine || 'text',
+    };
+  }
+
   const fields = {};
   const confidence = {};
-  const { type, signals } = classify(src);
 
   for (const [key, re] of RULES) {
     if (fields[key] !== undefined) continue;
