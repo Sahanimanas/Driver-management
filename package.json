@@ -10,6 +10,7 @@
     "build": "npm run build --prefix web",
     "start": "npm run start --prefix server",
     "test:extraction": "npm run test:extraction --prefix server",
+    "check:ocr": "npm run check:ocr --prefix server",
     "test:api": "npm run test:api --prefix server",
     "test:payroll": "npm run test:payroll --prefix server",
     "load-structures": "npm run load-structures --prefix server",
